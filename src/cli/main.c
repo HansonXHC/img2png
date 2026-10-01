@@ -297,7 +297,7 @@ int main(int argc, char **argv)
         job_t *j = &jobs[i];
         img2png_result_t *r = &j->result;
         if (r->ok) {
-            const char *same = !strcmp(j->in_path, j->out_path);
+            const int same = !strcmp(j->in_path, j->out_path);
             printf("[ ok ] %s (%s %d-bit %dx%d) -> %s  %llu -> %llu bytes, %.2fs\n",
                    j->in_path, img2png_color_name(r->out_color), r->out_depth,
                    r->out_w, r->out_h, same ? "(in place)" : j->out_path,

@@ -4,8 +4,16 @@
 #include "enc/pngenc.h"
 #include "util/filetime.h"
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/stat.h>
+
+#ifdef _WIN32
+#define img_stricmp _stricmp
+#else
+#define img_stricmp strcasecmp
+#endif
 #include "util/platform.h"
 
 typedef enum { FMT_UNKNOWN = 0, FMT_BMP, FMT_TGA, FMT_PNM, FMT_ICO, FMT_JPEG, FMT_PNG } fmt_t;
@@ -19,14 +27,14 @@ static fmt_t fmt_from_ext(const char *path)
     if (!dot || (sep && dot < sep))
         return FMT_UNKNOWN;
     dot++;
-    if (!_stricmp(dot, "bmp") || !_stricmp(dot, "dib")) return FMT_BMP;
-    if (!_stricmp(dot, "tga"))                          return FMT_TGA;
-    if (!_stricmp(dot, "pnm") || !_stricmp(dot, "ppm") ||
-        !_stricmp(dot, "pgm") || !_stricmp(dot, "pbm")) return FMT_PNM;
-    if (!_stricmp(dot, "ico"))                          return FMT_ICO;
-    if (!_stricmp(dot, "jpg") || !_stricmp(dot, "jpeg") ||
-        !_stricmp(dot, "jfif"))                         return FMT_JPEG;
-    if (!_stricmp(dot, "png"))                          return FMT_PNG;
+    if (!img_stricmp(dot, "bmp") || !img_stricmp(dot, "dib")) return FMT_BMP;
+    if (!img_stricmp(dot, "tga"))                          return FMT_TGA;
+    if (!img_stricmp(dot, "pnm") || !img_stricmp(dot, "ppm") ||
+        !img_stricmp(dot, "pgm") || !img_stricmp(dot, "pbm")) return FMT_PNM;
+    if (!img_stricmp(dot, "ico"))                          return FMT_ICO;
+    if (!img_stricmp(dot, "jpg") || !img_stricmp(dot, "jpeg") ||
+        !img_stricmp(dot, "jfif"))                         return FMT_JPEG;
+    if (!img_stricmp(dot, "png"))                          return FMT_PNG;
     return FMT_UNKNOWN;
 }
 

@@ -4,9 +4,12 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/stat.h>
+#ifdef _WIN32
 #include <direct.h>
-#include <png.h>
 #include <windows.h>
+#endif
+#include <png.h>
 
 #include "image.h"
 #include "dec/decode.h"
@@ -286,15 +289,17 @@ static int compare_rgba(const uint8_t *a, const uint8_t *b, int n)
 
 static uint64_t file_time_stamp(const char *path, int create)
 {
-    void *h = img_open_read_attrs(path);
-    if (!h)
+    uint8_t c[16] = {0}, m[16] = {0};
+    if (get_file_times(path, c, m) != 0)
         return 0;
-    FILETIME ft;
-    BOOL ok = GetFileTime((HANDLE)h, create ? &ft : NULL, NULL, create ? NULL : &ft);
-    img_close_handle(h);
-    if (!ok)
-        return 0;
-    return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+    if (create) {
+        uint64_t v;
+        memcpy(&v, c, 8);
+        return v;
+    }
+    uint64_t v;
+    memcpy(&v, m, 8);
+    return v;
 }
 
 int main(int argc, char **argv)
@@ -316,7 +321,11 @@ int main(int argc, char **argv)
     }
 
     printf("img2png self-test\n");
+#ifdef _WIN32
     _mkdir("testout");
+#else
+    mkdir("testout", 0755);
+#endif
 
     png_opts_t opts;
     opts.level = 9;
@@ -529,15 +538,16 @@ pgm_done:;
         FILE *g = img_fopen_write("testout/ts_out.bin");
         fwrite("y", 1, 1, g);
         fclose(g);
-        /* make the input's times distinctly old */
-        void *h = img_open_write_attrs("testout/ts_in.bin");
-        FILETIME old_t;
-        ULARGE_INTEGER ul;
-        ul.QuadPart = 100000000000000000ULL;    /* some time in 1601.. */
-        old_t.dwLowDateTime = ul.LowPart;
-        old_t.dwHighDateTime = ul.HighPart;
-        SetFileTime((HANDLE)h, &old_t, NULL, &old_t);
-        img_close_handle(h);
+        /* make the input's times distinctly old (portable) */
+        {
+            /* raw payload 1e17: a very old timestamp on Windows (FILETIME),
+             * harmless on POSIX where only mtime is applied */
+            uint64_t old_v = 100000000000000000ULL;
+            uint8_t c[16] = {0}, m[16] = {0};
+            memcpy(c, &old_v, 8);
+            memcpy(m, &old_v, 8);
+            set_file_times("testout/ts_in.bin", c, m);
+        }
         CHECK(copy_file_times("testout/ts_in.bin", "testout/ts_out.bin") == 0, "copy_file_times");
         uint64_t c_in = file_time_stamp("testout/ts_in.bin", 1);
         uint64_t c_out = file_time_stamp("testout/ts_out.bin", 1);
@@ -590,17 +600,12 @@ pgm_done:;
         png_opts_t o9 = opts; o9.level = 9;
         png_write_file(&img, &o0, "testout/lvl0.png", err, sizeof(err));
         png_write_file(&img, &o9, "testout/lvl9.png", err, sizeof(err));
-        HANDLE h0 = CreateFileA("testout/lvl0.png", FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        HANDLE h9 = CreateFileA("testout/lvl9.png", FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL,
-                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
-        LARGE_INTEGER s0 = {0}, s9 = {0};
-        GetFileSizeEx(h0, &s0);
-        GetFileSizeEx(h9, &s9);
-        CloseHandle(h0);
-        CloseHandle(h9);
-        printf("        level 0: %lld bytes, level 9: %lld bytes\n", s0.QuadPart, s9.QuadPart);
-        CHECK(s9.QuadPart <= s0.QuadPart, "level 9 compresses at least as well as level 0");
+        struct stat st0 = {0}, st9 = {0};
+        stat("testout/lvl0.png", &st0);
+        stat("testout/lvl9.png", &st9);
+        long long s0 = (long long)st0.st_size, s9 = (long long)st9.st_size;
+        printf("        level 0: %lld bytes, level 9: %lld bytes\n", s0, s9);
+        CHECK(s9 <= s0, "level 9 compresses at least as well as level 0");
         img_free(&img);
         }
     }
