@@ -122,11 +122,12 @@ int png_decode_mem(const uint8_t *data, size_t size, img_image_t *img,
                 img->pal_alpha[i] = 255;
         }
     } else if (img->color == IMG_GRAY) {
-        png_uint_16p trans_gray = NULL;
+        png_color_16p trans_color = NULL;
         int ntrans = 0;
-        if (png_get_tRNS(png, info, NULL, &ntrans, &trans_gray) && ntrans > 0) {
+        if (png_get_tRNS(png, info, NULL, &ntrans, &trans_color) &&
+            ntrans > 0 && trans_color != NULL) {
             img->has_gray_trns = 1;
-            img->gray_trns_value = trans_gray[0];
+            img->gray_trns_value = trans_color->gray;
         }
     }
 

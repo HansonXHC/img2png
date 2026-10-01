@@ -1,6 +1,7 @@
 #ifndef IMG2PNG_PNGERR_H
 #define IMG2PNG_PNGERR_H
 
+#include <stdlib.h>
 #include <setjmp.h>
 #include <stdio.h>
 #include <stddef.h>
