@@ -1,4 +1,4 @@
-# img2png v1.0.0
+# img2png
 
 [English](README.md) | 中文
 
