@@ -102,6 +102,31 @@ int img2png_convert(const char *in_path, const char *out_path,
     img_image_t img;
     int rc;
     if (fmt == FMT_PNG) {
+        /* verify the magic first: a ".png"-named file may actually be some
+         * other format; sniff and convert that instead when recognizable */
+        static const uint8_t png_sig[8] = {0x89, 'P', 'N', 'G', 0x0D, 0x0A, 0x1A, 0x0A};
+        uint8_t sig[8] = {0};
+        size_t got = fread(sig, 1, 8, f);
+        rewind(f);
+        if (got < 8 || memcmp(sig, png_sig, 8) != 0) {
+            if (sig[0] == 0xFF && sig[1] == 0xD8)
+                fmt = FMT_JPEG;
+            else if (sig[0] == 'B' && sig[1] == 'M')
+                fmt = FMT_BMP;
+            else if (sig[0] == 0 && sig[1] == 0 && sig[2] == 1 && sig[3] == 0)
+                fmt = FMT_ICO;
+            else if (sig[0] == 'P' && sig[1] >= '1' && sig[1] <= '6')
+                fmt = FMT_PNM;
+            else {
+                fclose(f);
+                snprintf(result->err, sizeof(result->err),
+                         "file has a .png name but is not a PNG (and no other known format detected)");
+                return -1;
+            }
+        }
+    }
+
+    if (fmt == FMT_PNG) {
         /* PNG input: read the whole file, decode it, re-encode with new settings */
         long fsize = -1;
         if (fseek(f, 0, SEEK_END) == 0) {

@@ -103,6 +103,8 @@ void ConvertTask::run()
                    .arg(r.in_size).arg(r.out_size)
                    .arg(QString::number(r.secs, 'f', 2))
                    .arg(replaced ? tr2("，已删除原文件", ", original deleted") : QString());
+        if (!replaced && in_ == out_ && r.out_size >= r.in_size)
+            line += tr2("（原文件已是最佳压缩）", " (source was already optimally compressed)");
     } else {
         line = tr2("[失败] %1: %2", "[fail] %1: %2")
                    .arg(in_, QString::fromLocal8Bit(r.err));
