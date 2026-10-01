@@ -27,6 +27,8 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/zlib/CMakeLists.txt")
     set(ZLIB_INCLUDE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/zlib" "${CMAKE_BINARY_DIR}/zlib-build")
     if(MSVC)
         set(ZLIB_LIBRARY "${CMAKE_BINARY_DIR}/zlib-build/zlibstatic.lib")
+    elseif(APPLE OR UNIX)
+        set(ZLIB_LIBRARY "${CMAKE_BINARY_DIR}/zlib-build/libz.a")   # OUTPUT_NAME z on unix
     else()
         set(ZLIB_LIBRARY "${CMAKE_BINARY_DIR}/zlib-build/libzlibstatic.a")
     endif()

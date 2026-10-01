@@ -110,7 +110,9 @@ int png_write_file(const img_image_t *img, const png_opts_t *opts,
             png_set_tRNS(png, info, alpha, img->pal_ncolors, NULL);
         }
     } else if (img->color == IMG_GRAY && img->has_gray_trns) {
-        png_uint_16 v = img->gray_trns_value;
+        png_color_16 v;
+        memset(&v, 0, sizeof(v));
+        v.gray = img->gray_trns_value;
         png_set_tRNS(png, info, NULL, 0, &v);
     }
 
