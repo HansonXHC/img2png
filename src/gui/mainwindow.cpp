@@ -392,7 +392,7 @@ void MainWindow::runConversion()
     if (!outDir.isEmpty()) {
         QDir().mkpath(outDir);
         if (!outDir.endsWith('/') && !outDir.endsWith('\\'))
-            outDir += '\\';
+            outDir += '/';
     }
 
     png_opts_t o;
@@ -417,7 +417,7 @@ void MainWindow::runConversion()
         if (!outDir.isEmpty())
             out = outDir + fi.completeBaseName() + ".png";
         else
-            out = fi.absolutePath() + "\\" + fi.completeBaseName() + ".png";
+            out = fi.absolutePath() + '/' + fi.completeBaseName() + ".png";
 
         /* refuse to clobber the source file unless explicitly allowed */
         if (!overwriteBox_->isChecked() &&

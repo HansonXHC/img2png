@@ -37,9 +37,11 @@
 ### 依赖
 
 - CMake ≥ 3.21
-- C 编译器（在 MinGW-w64 gcc 13 上开发测试；MSVC 未测试）
+- C 编译器（Windows：MinGW-w64 gcc，已测试；Linux：gcc/clang；macOS：Xcode 命令行工具的 clang）
+- Linux：`sudo apt install cmake ninja-build g++ qt6-base-dev` · macOS：`brew install cmake ninja qt`
 - **zlib / libpng 1.6.59 / libjpeg-turbo 3.2.0 已内置于 `thirdparty/`**（裁剪后的源码副本，
   配置时自动一起构建），**无需联网、无需手动安装**
+- **跨平台**：同一套 CMake 构建支持 Windows / Linux / macOS —— GitHub Actions 自动构建三平台（见 `.github/workflows/build.yml`）
 - Qt 6（可选，仅构建 GUI 需要；没有 Qt 时自动只构建 CLI）
 
 ### 步骤
@@ -135,8 +137,9 @@ img2png -l 6 -f paeth --auto a.ppm     # 自定义级别/滤镜/自动优化
 
 - 16 位 BMP 输入不支持
 - `-o 输出目录` 模式输出平铺，子目录同名文件会覆盖
-- Windows ANSI 代码页处理路径（非 ASCII 路径在非系统代码页下可能异常）
-- 仅在 MinGW-w64 (gcc 13) 上测试过；MSVC 理论可用但未验证
+- Windows 上路径按 ANSI 代码页处理（非 ASCII 路径在非系统代码页下可能异常）；Linux/macOS 使用 UTF-8
+- Windows x64 已本地实测；Linux/macOS 由 CI 构建（`.github/workflows/build.yml`），尚未在真机验证
+- MSVC 理论可用但未验证
 
 ## 第三方库
 

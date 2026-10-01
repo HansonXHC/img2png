@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(img2png VERSION 1.0.0 LANGUAGES C CXX)
+project(img2png VERSION 1.0.1 LANGUAGES C CXX)
 
 option(IMG2PNG_GUI "Build the Qt GUI" ON)
 option(IMG2PNG_TESTS "Build tests" ON)
@@ -162,6 +162,11 @@ add_library(img2png_core STATIC
 target_include_directories(img2png_core PUBLIC src)
 target_compile_definitions(img2png_core PUBLIC _CRT_SECURE_NO_WARNINGS)
 
+if(NOT WIN32)
+    find_package(Threads REQUIRED)
+    target_link_libraries(img2png_core PUBLIC Threads::Threads)
+endif()
+
 target_link_libraries(img2png_core PUBLIC ${IMG2PNG_PNG_TARGET} ${IMG2PNG_JPEG_TARGET})
 
 # libjpeg-turbo's targets don't carry PUBLIC include dirs (upstream expects
@@ -193,7 +198,10 @@ if(IMG2PNG_GUI)
         set(IMG2PNG_GUI OFF)
     else()
         qt_standard_project_setup()
-        qt_add_executable(img2png-gui WIN32
+        if(APPLE)
+            set(IMG2PNG_GUI_MACOSX_BUNDLE MACOSX_BUNDLE)
+        endif()
+        qt_add_executable(img2png-gui WIN32 ${IMG2PNG_GUI_MACOSX_BUNDLE}
             src/gui/main_gui.cpp
             src/gui/mainwindow.cpp
             src/gui/mainwindow.h

@@ -1,11 +1,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <windows.h>
+#include <strings.h>
 
 #include "convert.h"
 #include "enc/pngenc.h"
 #include "util/threads.h"
+#include "util/platform.h"
+
+#include <sys/stat.h>
+#if defined(_WIN32) && !defined(IMG2PNG_FORCE_POSIX)
+#include <windows.h>
+#define IMG_PATH_MAX MAX_PATH
+#define IMG_STRDUP _strdup
+#define img_stricmp _stricmp
+#else
+#include <dirent.h>
+#include <limits.h>
+#include <sys/types.h>
+#define IMG_PATH_MAX PATH_MAX
+#define IMG_STRDUP strdup
+#define img_stricmp strcasecmp
+#endif
 
 typedef struct {
     char **items;
@@ -23,7 +39,7 @@ static void sl_append(strlist_t *l, const char *s)
             exit(1);
         }
     }
-    l->items[l->count++] = _strdup(s);
+    l->items[l->count++] = IMG_STRDUP(s);
 }
 
 static void sl_free(strlist_t *l)
@@ -33,10 +49,23 @@ static void sl_free(strlist_t *l)
     free(l->items);
 }
 
+static int is_dir_sep(char c)
+{
+    return c == '/' || c == '\\';
+}
+
+static const char *base_name(const char *path)
+{
+    const char *s1 = strrchr(path, '/'), *s2 = strrchr(path, '\\');
+    const char *sep = s1 > s2 ? s1 : s2;
+    return sep ? sep + 1 : path;
+}
+
 /* Collect supported images from a directory, recursively. */
+#if defined(_WIN32) && !defined(IMG2PNG_FORCE_POSIX)
 static void scan_dir(const char *dir, strlist_t *out)
 {
-    char pattern[MAX_PATH];
+    char pattern[IMG_PATH_MAX];
     snprintf(pattern, sizeof(pattern), "%s\\*", dir);
     WIN32_FIND_DATAA fd;
     HANDLE h = FindFirstFileA(pattern, &fd);
@@ -45,7 +74,7 @@ static void scan_dir(const char *dir, strlist_t *out)
     do {
         if (!strcmp(fd.cFileName, ".") || !strcmp(fd.cFileName, ".."))
             continue;
-        char full[MAX_PATH];
+        char full[IMG_PATH_MAX];
         snprintf(full, sizeof(full), "%s\\%s", dir, fd.cFileName);
         if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)
             scan_dir(full, out);
@@ -54,19 +83,42 @@ static void scan_dir(const char *dir, strlist_t *out)
     } while (FindNextFileA(h, &fd));
     FindClose(h);
 }
+#else
+static void scan_dir(const char *dir, strlist_t *out)
+{
+    DIR *d = opendir(dir);
+    if (!d)
+        return;
+    struct dirent *e;
+    while ((e = readdir(d)) != NULL) {
+        if (!strcmp(e->d_name, ".") || !strcmp(e->d_name, ".."))
+            continue;
+        char full[IMG_PATH_MAX];
+        snprintf(full, sizeof(full), "%s/%s", dir, e->d_name);
+        struct stat st;
+        if (stat(full, &st) != 0)
+            continue;
+        if (S_ISDIR(st.st_mode))
+            scan_dir(full, out);
+        else if (img2png_is_supported_file(full))
+            sl_append(out, full);
+    }
+    closedir(d);
+}
+#endif
 
 static void add_input(const char *path, strlist_t *out)
 {
-    DWORD attr = GetFileAttributesA(path);
-    if (attr != INVALID_FILE_ATTRIBUTES && (attr & FILE_ATTRIBUTE_DIRECTORY))
+    struct stat st;
+    if (stat(path, &st) == 0 && S_ISDIR(st.st_mode))
         scan_dir(path, out);
     else
         sl_append(out, path);
 }
 
 typedef struct {
-    char in_path[MAX_PATH];
-    char out_path[MAX_PATH];
+    char in_path[IMG_PATH_MAX];
+    char out_path[IMG_PATH_MAX];
     int done;
     img2png_result_t result;
 } job_t;
@@ -104,10 +156,7 @@ static void usage(void)
 
 static void make_out_name(const char *in, char *out, size_t outlen)
 {
-    const char *slash1 = strrchr(in, '/');
-    const char *slash2 = strrchr(in, '\\');
-    const char *sep = slash1 > slash2 ? slash1 : slash2;
-    const char *base = sep ? sep + 1 : in;
+    const char *base = base_name(in);
     const char *dot = strrchr(base, '.');
     if (dot && dot != base)
         snprintf(out, outlen, "%.*s.png", (int)(dot - in), in);
@@ -118,10 +167,8 @@ static void make_out_name(const char *in, char *out, size_t outlen)
 static int out_path_is_png(const char *path)
 {
     const char *dot = strrchr(path, '.');
-    const char *slash1 = strrchr(path, '/');
-    const char *slash2 = strrchr(path, '\\');
-    const char *sep = slash1 > slash2 ? slash1 : slash2;
-    return dot && (!sep || dot > sep) && !_stricmp(dot + 1, "png");
+    const char *base = base_name(path);
+    return dot && dot >= base && !img_stricmp(dot + 1, "png");
 }
 
 int main(int argc, char **argv)
@@ -132,7 +179,7 @@ int main(int argc, char **argv)
     opts.auto_optimize = 0;
     opts.recompress_png = 1;
     int keep_time = 1;
-    int nthreads = (int)GetCurrentProcessorNumber();
+    int nthreads = img_num_cpus();
     const char *out_spec = NULL;
     strlist_t inputs = {0};
 
@@ -192,15 +239,15 @@ int main(int argc, char **argv)
 
     /* resolve output paths: explicit .png = single output, otherwise a dir;
      * no -o at all = next to each input */
-    char out_dir[MAX_PATH] = "";
-    char single_out[MAX_PATH] = "";
+    char out_dir[IMG_PATH_MAX] = "";
+    char single_out[IMG_PATH_MAX] = "";
     int out_is_dir = 0;
     if (out_spec) {
         if (nfiles == 1 && out_path_is_png(out_spec)) {
-            strcpy_s(single_out, sizeof(single_out), out_spec);
+            snprintf(single_out, sizeof(single_out), "%s", out_spec);
         } else {
-            strcpy_s(out_dir, sizeof(out_dir), out_spec);
-            CreateDirectoryA(out_dir, NULL);    /* ok if it already exists */
+            snprintf(out_dir, sizeof(out_dir), "%s", out_spec);
+            img_mkdir(out_dir);                 /* ok if it already exists */
             out_is_dir = 1;
         }
     }
@@ -214,24 +261,18 @@ int main(int argc, char **argv)
 
     for (int i = 0; i < nfiles; i++) {
         job_t *j = &jobs[i];
-        strcpy_s(j->in_path, sizeof(j->in_path), inputs.items[i]);
+        snprintf(j->in_path, sizeof(j->in_path), "%s", inputs.items[i]);
         if (out_is_dir) {
-            /* keep the relative structure when scanning a folder that is
-             * also the input root */
-            const char *src = inputs.items[i];
-            const char *slash1 = strrchr(src, '/');
-            const char *slash2 = strrchr(src, '\\');
-            const char *sep = slash1 > slash2 ? slash1 : slash2;
-            const char *base = sep ? sep + 1 : src;
-            _snprintf(j->out_path, sizeof(j->out_path), "%s\\%s", out_dir, base);
-            j->out_path[sizeof(j->out_path) - 1] = 0;
+            snprintf(j->out_path, sizeof(j->out_path), "%s/%s", out_dir,
+                     base_name(inputs.items[i]));
             char *dot = strrchr(j->out_path, '.');
-            if (dot && dot > strrchr(j->out_path, '\\'))
-                strcpy_s(dot, sizeof(j->out_path) - (size_t)(dot - j->out_path), ".png");
+            if (dot && !is_dir_sep(dot[-1]))
+                snprintf(dot, sizeof(j->out_path) - (size_t)(dot - j->out_path), ".png");
             else
-                strcat_s(j->out_path, sizeof(j->out_path), ".png");
+                snprintf(j->out_path + strlen(j->out_path),
+                         sizeof(j->out_path) - strlen(j->out_path), ".png");
         } else if (single_out[0]) {
-            strcpy_s(j->out_path, sizeof(j->out_path), single_out);
+            snprintf(j->out_path, sizeof(j->out_path), "%s", single_out);
         } else {
             make_out_name(inputs.items[i], j->out_path, sizeof(j->out_path));
         }
@@ -252,7 +293,7 @@ int main(int argc, char **argv)
     int failures = 0;
     for (int i = 0; i < nfiles; i++) {
         while (!jobs[i].done)
-            Sleep(5);
+            img_msleep(5);
         job_t *j = &jobs[i];
         img2png_result_t *r = &j->result;
         if (r->ok) {

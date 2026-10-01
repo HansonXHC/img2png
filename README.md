@@ -13,6 +13,7 @@ A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6
 - **Timestamp preservation**: output files keep the input's creation and modification times (even for in-place recompression)
 - **PNG re-encoding**: PNG inputs are re-encoded with the current settings — pixels unchanged, perfect for squeezing PNGs produced by other tools
 - **Vendored dependencies**: zlib / libpng / libjpeg-turbo sources are bundled in `thirdparty/` — builds fully offline, no network or manual installs needed
+- **Cross-platform**: one CMake build for Windows / Linux / macOS — GitHub Actions builds all three automatically (see `.github/workflows/build.yml`)
 
 ## Supported input formats & bit-depth matching rules
 
@@ -36,7 +37,8 @@ A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6
 ### Requirements
 
 - CMake ≥ 3.21
-- A C compiler (developed and tested with MinGW-w64 gcc 13; MSVC untested)
+- A C compiler (Windows: MinGW-w64 gcc, tested; Linux: gcc/clang; macOS: clang via Xcode command-line tools)
+- Linux: `sudo apt install cmake ninja-build g++ qt6-base-dev` · macOS: `brew install cmake ninja qt`
 - **zlib / libpng / libjpeg-turbo are vendored in `thirdparty/`** (trimmed source copies, built together automatically) — **no network access and no manual installs required**
 - Qt 6 (optional, only for the GUI; the CLI builds automatically when Qt is absent)
 
@@ -136,8 +138,9 @@ lossless verification, all filter modes, compression levels, timestamp preservat
 
 - 16-bit BMP input is not supported
 - `-o outdir` flattens the output; identically-named files from different subdirectories overwrite each other
-- Paths are handled via the Windows ANSI code page
-- Only tested on MinGW-w64 (gcc 13); MSVC should work but is unverified
+- On Windows, paths are handled via the ANSI code page; Linux/macOS use UTF-8
+- Windows x64 is tested locally; Linux/macOS builds run in CI (`.github/workflows/build.yml`) but have not been verified on real hardware yet
+- MSVC should work but is unverified
 
 ## Third-party libraries
 

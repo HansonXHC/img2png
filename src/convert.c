@@ -5,7 +5,8 @@
 #include "util/filetime.h"
 #include <stdio.h>
 #include <string.h>
-#include <windows.h>
+#include <sys/stat.h>
+#include "util/platform.h"
 
 typedef enum { FMT_UNKNOWN = 0, FMT_BMP, FMT_TGA, FMT_PNM, FMT_ICO, FMT_JPEG, FMT_PNG } fmt_t;
 
@@ -60,6 +61,7 @@ int img2png_is_supported_file(const char *path)
 
 static unsigned long long file_size(const char *path)
 {
+#if defined(_WIN32) && !defined(IMG2PNG_FORCE_POSIX)
     HANDLE h = CreateFileA(path, FILE_READ_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE,
                            NULL, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
     if (h == INVALID_HANDLE_VALUE)
@@ -68,6 +70,12 @@ static unsigned long long file_size(const char *path)
     GetFileSizeEx(h, &sz);
     CloseHandle(h);
     return (unsigned long long)sz.QuadPart;
+#else
+    struct stat st;
+    if (stat(path, &st) != 0)
+        return 0;
+    return (unsigned long long)st.st_size;
+#endif
 }
 
 int img2png_convert(const char *in_path, const char *out_path,
@@ -84,9 +92,7 @@ int img2png_convert(const char *in_path, const char *out_path,
         return -1;
     }
 
-    LARGE_INTEGER freq, t0, t1;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&t0);
+    double t0 = img_now_sec(), t1;
 
     /* save the source's times before any (possibly in-place) write */
     uint8_t ctime[8] = {0}, mtime[8] = {0};
@@ -177,8 +183,8 @@ int img2png_convert(const char *in_path, const char *out_path,
     if (have_times)
         set_file_times(out_path, ctime, mtime);
 
-    QueryPerformanceCounter(&t1);
-    result->secs = (double)(t1.QuadPart - t0.QuadPart) / (double)freq.QuadPart;
+    t1 = img_now_sec();
+    result->secs = t1 - t0;
     result->in_size = in_size;
     result->out_size = file_size(out_path);
     result->ok = 1;

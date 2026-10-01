@@ -9,8 +9,8 @@ extern "C" {
  * Returns 0 on success, -1 on failure (not fatal for a conversion). */
 int copy_file_times(const char *src_path, const char *dst_path);
 
-/* Read creation + last-write times into caller-provided 8-byte buffers
- * (raw FILETIME payloads), so they survive an in-place overwrite. */
+/* Read creation + last-write times into caller-provided 16-byte buffers
+ * (platform timestamp payload), so they survive an in-place overwrite. */
 int get_file_times(const char *path, void *ctime_out, void *mtime_out);
 int set_file_times(const char *path, const void *ctime, const void *mtime);
 

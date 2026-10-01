@@ -1,7 +1,11 @@
 #include "image.h"
 #include <stdlib.h>
 #include <string.h>
+
+#if defined(_WIN32) && !defined(IMG2PNG_FORCE_POSIX)
 #include <windows.h>
+#define IMG2PNG_WINDOWS 1
+#endif
 
 size_t img_rowstride(int width, int bit_depth, int channels)
 {
@@ -29,6 +33,7 @@ void img_free(img_image_t *img)
     }
 }
 
+#ifdef IMG2PNG_WINDOWS
 static wchar_t *acp_to_wide(const char *s)
 {
     int n = MultiByteToWideChar(CP_ACP, 0, s, -1, NULL, 0);
@@ -82,6 +87,35 @@ void img_close_handle(void *handle)
     if (handle)
         CloseHandle((HANDLE)handle);
 }
+#else /* POSIX: plain byte paths */
+
+FILE *img_fopen_read(const char *path)
+{
+    return fopen(path, "rb");
+}
+
+FILE *img_fopen_write(const char *path)
+{
+    return fopen(path, "wb");
+}
+
+void *img_open_read_attrs(const char *path)
+{
+    return fopen(path, "rb");
+}
+
+void *img_open_write_attrs(const char *path)
+{
+    return fopen(path, "r+b");
+}
+
+void img_close_handle(void *handle)
+{
+    if (handle)
+        fclose((FILE *)handle);
+}
+
+#endif
 
 /* --auto mode: drop a fully opaque alpha channel and collapse gray-looking
  * RGB to GRAY.  Returns 1 if anything was changed. */
