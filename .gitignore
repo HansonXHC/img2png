@@ -1,0 +1,15 @@
+# build directories
+build/
+build-*/
+*-build/
+_deps/
+
+# test output
+testout/
+
+# local IDE / OS junk
+.vs/
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini

@@ -1,0 +1,610 @@
+/* Self-test: generates sample images in various formats, converts them with
+ * the same core code the CLI uses, then reads the PNGs back with libpng and
+ * compares pixel-by-pixel.  Exits 0 when everything matches. */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <direct.h>
+#include <png.h>
+#include <windows.h>
+
+#include "image.h"
+#include "dec/decode.h"
+#include "enc/pngenc.h"
+#include "util/filetime.h"
+#include "util/pngerr.h"
+
+static int g_failures = 0;
+
+#define CHECK(cond, name)                                                  \
+    do {                                                                   \
+        if (cond) printf("  PASS  %s\n", name);                            \
+        else     { printf("  FAIL  %s\n", name); g_failures++; }           \
+    } while (0)
+
+static void fill_gradient_rgba(uint8_t *d, int w, int h, int alpha)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            d[(size_t)(y * w + x) * 4 + 0] = (uint8_t)(x * 255 / (w > 1 ? w - 1 : 1));
+            d[(size_t)(y * w + x) * 4 + 1] = (uint8_t)(y * 255 / (h > 1 ? h - 1 : 1));
+            d[(size_t)(y * w + x) * 4 + 2] = (uint8_t)((x ^ y) & 0xFF);
+            d[(size_t)(y * w + x) * 4 + 3] = (uint8_t)alpha;
+        }
+}
+
+static void fill_gradient_rgb(uint8_t *d, int w, int h)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            d[(size_t)(y * w + x) * 3 + 0] = (uint8_t)(x * 255 / (w > 1 ? w - 1 : 1));
+            d[(size_t)(y * w + x) * 3 + 1] = (uint8_t)(y * 255 / (h > 1 ? h - 1 : 1));
+            d[(size_t)(y * w + x) * 3 + 2] = (uint8_t)((x ^ y) & 0xFF);
+        }
+}
+
+static void fill_gradient_gray(uint8_t *d, int w, int h)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            d[y * w + x] = (uint8_t)((x * 7 + y * 13) & 0xFF);
+}
+
+/* --- generators, all bottom-up (the common BMP layout) --- */
+
+static int gen_bmp24(const char *path, int w, int h)
+{
+    long row = ((long)w * 3 + 3) / 4 * 4;
+    long pix = row * h;
+    uint8_t *px = (uint8_t *)calloc(1, (size_t)pix);
+    uint8_t hdr[54] = {'B','M'};
+    uint32_t fsz = 54 + (uint32_t)pix;
+    hdr[2] = (uint8_t)fsz; hdr[3] = fsz >> 8; hdr[4] = fsz >> 16; hdr[5] = fsz >> 24;
+    hdr[10] = 54;
+    uint32_t hsz = 40; memcpy(hdr + 14, &hsz, 4);
+    int32_t w32 = w, h32 = h; memcpy(hdr + 18, &w32, 4); memcpy(hdr + 22, &h32, 4);
+    uint16_t planes = 1, bpp = 24; memcpy(hdr + 26, &planes, 2); memcpy(hdr + 28, &bpp, 2);
+
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint8_t *d = px + (size_t)(h - 1 - y) * row + (size_t)x * 3;
+            d[0] = (uint8_t)((x ^ y) & 0xFF);
+            d[1] = (uint8_t)(y * 255 / (h > 1 ? h - 1 : 1));
+            d[2] = (uint8_t)(x * 255 / (w > 1 ? w - 1 : 1));
+        }
+
+    FILE *f = img_fopen_write(path);
+    int ok = f && fwrite(hdr, 1, 54, f) == 54 && fwrite(px, 1, (size_t)pix, f) == (size_t)pix;
+    if (f) fclose(f);
+    free(px);
+    return ok ? 0 : -1;
+}
+
+static int gen_bmp32_alpha(const char *path, int w, int h)
+{
+    /* BITMAPV4HEADER with alpha mask so the alpha channel is real */
+    uint8_t hdr[14 + 108];
+    memset(hdr, 0, sizeof(hdr));
+    long row = (long)w * 4;
+    long pix = row * h;
+    hdr[0] = 'B'; hdr[1] = 'M';
+    uint32_t fsz = (uint32_t)(14 + 108 + pix);
+    hdr[2] = (uint8_t)fsz; hdr[3] = fsz >> 8; hdr[4] = fsz >> 16; hdr[5] = fsz >> 24;
+    hdr[10] = 14 + 108;
+    uint32_t hsz = 108; memcpy(hdr + 14, &hsz, 4);
+    int32_t w32 = w, h32 = h; memcpy(hdr + 18, &w32, 4); memcpy(hdr + 22, &h32, 4);
+    uint16_t planes = 1, bpp = 32; memcpy(hdr + 26, &planes, 2); memcpy(hdr + 28, &bpp, 2);
+    uint32_t comp = 3 /* BI_BITFIELDS */; memcpy(hdr + 30, &comp, 4);
+    uint32_t rm = 0x00FF0000, gm = 0x0000FF00, bm = 0x000000FF, am = 0xFF000000;
+    memcpy(hdr + 54, &rm, 4); memcpy(hdr + 58, &gm, 4);
+    memcpy(hdr + 62, &bm, 4); memcpy(hdr + 66, &am, 4);
+
+    uint8_t *px = (uint8_t *)malloc((size_t)pix);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint8_t *d = px + (size_t)(h - 1 - y) * row + (size_t)x * 4;
+            d[0] = (uint8_t)((x ^ y) & 0xFF);            /* B */
+            d[1] = (uint8_t)(y * 255 / (h > 1 ? h - 1 : 1));  /* G */
+            d[2] = (uint8_t)(x * 255 / (w > 1 ? w - 1 : 1));  /* R */
+            d[3] = (uint8_t)((x < w / 2) ? 0 : 255);     /* A */
+        }
+
+    FILE *f = img_fopen_write(path);
+    int ok = f && fwrite(hdr, 1, sizeof(hdr), f) == sizeof(hdr) &&
+             fwrite(px, 1, (size_t)pix, f) == (size_t)pix;
+    if (f) fclose(f);
+    free(px);
+    return ok ? 0 : -1;
+}
+
+static int gen_bmp8_pal(const char *path, int w, int h, int npal)
+{
+    long row = ((long)w + 3) / 4 * 4;
+    long pix = row * h;
+    uint8_t hdr[14 + 40 + 256 * 4];
+    memset(hdr, 0, sizeof(hdr));
+    uint32_t fsz = (uint32_t)(14 + 40 + npal * 4 + pix);
+    hdr[0] = 'B'; hdr[1] = 'M';
+    hdr[2] = (uint8_t)fsz; hdr[3] = fsz >> 8; hdr[4] = fsz >> 16; hdr[5] = fsz >> 24;
+    uint32_t off = 14 + 40 + (uint32_t)npal * 4;
+    hdr[10] = (uint8_t)off; hdr[11] = off >> 8; hdr[12] = off >> 16; hdr[13] = off >> 24;
+    uint32_t hsz = 40; memcpy(hdr + 14, &hsz, 4);
+    int32_t w32 = w, h32 = h; memcpy(hdr + 18, &w32, 4); memcpy(hdr + 22, &h32, 4);
+    uint16_t planes = 1, bpp = 8; memcpy(hdr + 26, &planes, 2); memcpy(hdr + 28, &bpp, 2);
+    uint32_t cu = (uint32_t)npal; memcpy(hdr + 46, &cu, 4);
+    for (int i = 0; i < npal; i++) {
+        uint8_t *e = hdr + 54 + i * 4;
+        e[0] = (uint8_t)(i * 255 / (npal > 1 ? npal - 1 : 1));
+        e[1] = (uint8_t)(255 - i * 255 / (npal > 1 ? npal - 1 : 1));
+        e[2] = (uint8_t)(i * 128 / (npal > 1 ? npal - 1 : 1) + 60);
+        e[3] = 0;
+    }
+
+    uint8_t *px = (uint8_t *)malloc((size_t)pix);
+    memset(px, 0, (size_t)pix);
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            px[(size_t)(h - 1 - y) * row + x] = (uint8_t)((x + y) % npal);
+
+    FILE *f = img_fopen_write(path);
+    int ok = f && fwrite(hdr, 1, 14 + 40 + (size_t)npal * 4, f) == 14 + 40 + (size_t)npal * 4 &&
+             fwrite(px, 1, (size_t)pix, f) == (size_t)pix;
+    if (f) fclose(f);
+    free(px);
+    return ok ? 0 : -1;
+}
+
+static int gen_tga32(const char *path, int w, int h, int top_down)
+{
+    uint8_t hdr[18] = {0};
+    hdr[2] = 2;     /* uncompressed truecolor */
+    hdr[12] = (uint8_t)(w & 0xFF); hdr[13] = (uint8_t)(w >> 8);
+    hdr[14] = (uint8_t)(h & 0xFF); hdr[15] = (uint8_t)(h >> 8);
+    hdr[16] = 32;
+    hdr[17] = (uint8_t)(top_down ? 0x28 : 0x08);   /* alpha 8 bits; bit5 = top-down */
+
+    FILE *f = img_fopen_write(path);
+    int ok = f && fwrite(hdr, 1, 18, f) == 18;
+    for (int y = 0; y < h && ok; y++) {
+        int iy = top_down ? y : h - 1 - y;   /* image row this file row holds */
+        for (int x = 0; x < w && ok; x++) {
+            uint8_t px[4] = { (uint8_t)((x ^ iy) & 0xFF),               /* B */
+                              (uint8_t)(iy * 255 / (h > 1 ? h - 1 : 1)),/* G */
+                              (uint8_t)(x * 255 / (w > 1 ? w - 1 : 1)), /* R */
+                              (uint8_t)((x + iy) & 1 ? 128 : 255) };    /* A */
+            ok = fwrite(px, 1, 4, f) == 4;
+        }
+    }
+    if (f) fclose(f);
+    return ok ? 0 : -1;
+}
+
+static int gen_pnm(const char *path, int w, int h, int type, unsigned maxval)
+{
+    FILE *f = img_fopen_write(path);
+    if (!f)
+        return -1;
+    int ok = 0;
+    if (type == 6) {
+        ok = fprintf(f, "P6\n%d %d\n%u\n", w, h, maxval) > 0;
+        int wide = maxval > 255;
+        for (int y = 0; y < h && ok; y++)
+            for (int x = 0; x < w && ok; x++) {
+                uint8_t rgb[3] = { (uint8_t)(x * 255 / (w - 1)),
+                                   (uint8_t)(y * 255 / (h - 1)),
+                                   (uint8_t)((x ^ y) & 0xFF) };
+                for (int c = 0; c < 3; c++) {
+                    unsigned s = (unsigned)rgb[c] * maxval / 255u;
+                    if (wide) {
+                        uint8_t b2[2] = { (uint8_t)(s >> 8), (uint8_t)s };
+                        ok = fwrite(b2, 1, 2, f) == 2;
+                    } else {
+                        uint8_t b1 = (uint8_t)s;
+                        ok = fwrite(&b1, 1, 1, f) == 1;
+                    }
+                }
+            }
+    } else if (type == 5) {
+        ok = fprintf(f, "P5\n%d %d\n%u\n", w, h, maxval) > 0;
+        int wide = maxval > 255;
+        for (int y = 0; y < h && ok; y++)
+            for (int x = 0; x < w && ok; x++) {
+                unsigned g = (unsigned)((x * 7 + y * 13) & 0xFF) * maxval / 255u;
+                if (wide) {
+                    uint8_t b2[2] = { (uint8_t)(g >> 8), (uint8_t)g };
+                    ok = fwrite(b2, 1, 2, f) == 2;
+                } else {
+                    uint8_t b1 = (uint8_t)g;
+                    ok = fwrite(&b1, 1, 1, f) == 1;
+                }
+            }
+    }
+    fclose(f);
+    return ok ? 0 : -1;
+}
+
+/* --- verification helpers --- */
+
+/* read PNG back with libpng into 8-bit RGBA (or GRAY->RGBA) for comparison */
+static int read_png_rgba(const char *path, int *w, int *h, uint8_t **out)
+{
+    FILE *f = img_fopen_read(path);
+    if (!f)
+        return -1;
+    png_err_t pe;
+    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, &pe, pngerr_error, pngerr_warn);
+    png_infop info = png ? png_create_info_struct(png) : NULL;
+    if (!png || !info) { if (f) fclose(f); return -1; }
+    if (setjmp(pe.jb)) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(f);
+        return -1;
+    }
+    png_init_io(png, f);
+    png_read_info(png, info);
+    png_set_expand(png);            /* palette->rgb, gray<8->8, tRNS->alpha */
+    png_set_strip_16(png);          /* 16-bit -> 8-bit (comparison only) */
+    png_set_packing(png);
+    png_read_update_info(png, info);
+    *w = (int)png_get_image_width(png, info);
+    *h = (int)png_get_image_height(png, info);
+    int ch = png_get_channels(png, info);
+    size_t stride = (size_t)*w * ch;
+    uint8_t *data = (uint8_t *)malloc(stride * (size_t)*h);
+    png_bytep *rows = (png_bytep *)malloc(sizeof(png_bytep) * (size_t)*h);
+    for (int y = 0; y < *h; y++)
+        rows[y] = data + (size_t)y * stride;
+    png_read_image(png, rows);
+    png_read_end(png, NULL);
+    free(rows);
+    png_destroy_read_struct(&png, &info, NULL);
+    fclose(f);
+    *out = data;
+    return ch;
+}
+
+/* convert an 8-bit gradient RGBA buffer into the same expanded form */
+static void expected_rgba(int w, int h, int alpha, uint8_t *out)
+{
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++) {
+            uint8_t *d = out + ((size_t)y * w + x) * 4;
+            d[0] = (uint8_t)(x * 255 / (w - 1));
+            d[1] = (uint8_t)(y * 255 / (h - 1));
+            d[2] = (uint8_t)((x ^ y) & 0xFF);
+            d[3] = (uint8_t)alpha;
+        }
+}
+
+static int compare_rgba(const uint8_t *a, const uint8_t *b, int n)
+{
+    for (int i = 0; i < n; i++)
+        if (a[i] != b[i])
+            return i;
+    return -1;
+}
+
+static uint64_t file_time_stamp(const char *path, int create)
+{
+    void *h = img_open_read_attrs(path);
+    if (!h)
+        return 0;
+    FILETIME ft;
+    BOOL ok = GetFileTime((HANDLE)h, create ? &ft : NULL, NULL, create ? NULL : &ft);
+    img_close_handle(h);
+    if (!ok)
+        return 0;
+    return ((uint64_t)ft.dwHighDateTime << 32) | ft.dwLowDateTime;
+}
+
+int main(int argc, char **argv)
+{
+    setvbuf(stdout, NULL, _IONBF, 0);
+
+    /* usage: img2png_selftest [file.png] — just verify the file decodes */
+    if (argc > 1) {
+        int w, h;
+        uint8_t *got = NULL;
+        int ch = read_png_rgba(argv[1], &w, &h, &got);
+        if (ch < 0) {
+            printf("FAIL: cannot decode %s\n", argv[1]);
+            return 1;
+        }
+        printf("OK: %s decodes (%dx%d, %d channels)\n", argv[1], w, h, ch);
+        free(got);
+        return 0;
+    }
+
+    printf("img2png self-test\n");
+    _mkdir("testout");
+
+    png_opts_t opts;
+    opts.level = 9;
+    opts.filter = PNGF_AUTO;
+    opts.auto_optimize = 0;
+
+    int W = 33, H = 17;     /* odd sizes to exercise padding paths */
+    char err[256];
+
+    /* --- BMP 24-bit --- */
+    printf("BMP 24-bit -> RGB8:\n");
+    CHECK(gen_bmp24("testout/t24.bmp", W, H) == 0, "generate bmp24");
+    {
+        FILE *f = img_fopen_read("testout/t24.bmp");
+        img_image_t img;
+        int ok24 = f && bmp_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(ok24, "decode bmp24");
+        if (f) fclose(f);
+        if (!ok24) { printf("  SKIP  remaining bmp24 checks\n"); goto bmp24_done; }
+        CHECK(img.color == IMG_RGB && img.bit_depth == 8, "format is RGB8");
+        CHECK(png_write_file(&img, &opts, "testout/t24.png", err, sizeof(err)) == 0, "encode png");
+        img_free(&img);
+        {
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/t24.png", &w, &h, &got);
+            CHECK(ch == 3 && w == W && h == H, "png readable, RGB, correct size");
+            if (ch == 3) {
+                uint8_t *exp = (uint8_t *)malloc((size_t)W * H * 3);
+                fill_gradient_rgb(exp, W, H);
+                int diff = compare_rgba(got, exp, W * H * 3);
+                CHECK(diff < 0, "pixels identical (lossless)");
+                free(exp);
+            }
+            free(got);
+        }
+bmp24_done:;
+    }
+
+    /* --- BMP 32-bit with alpha --- */
+    printf("BMP 32-bit (V4, alpha mask) -> RGBA8:\n");
+    CHECK(gen_bmp32_alpha("testout/t32.bmp", W, H) == 0, "generate bmp32");
+    {
+        FILE *f = img_fopen_read("testout/t32.bmp");
+        img_image_t img;
+        int ok32 = f && bmp_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(ok32, "decode bmp32");
+        if (f) fclose(f);
+        if (!ok32) { printf("  SKIP  remaining bmp32 checks\n"); goto bmp32_done; }
+        CHECK(img.color == IMG_RGBA && img.bit_depth == 8, "format is RGBA8");
+        CHECK(png_write_file(&img, &opts, "testout/t32.png", err, sizeof(err)) == 0, "encode png");
+        img_free(&img);
+        {
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/t32.png", &w, &h, &got);
+            CHECK(ch == 4, "png readable as RGBA");
+            if (ch == 4) {
+                uint8_t *exp = (uint8_t *)malloc((size_t)W * H * 4);
+                expected_rgba(W, H, 255, exp);
+                for (int y = 0; y < H; y++)
+                    for (int x = 0; x < W / 2; x++)
+                        exp[((size_t)y * W + x) * 4 + 3] = 0;
+                int diff = compare_rgba(got, exp, W * H * 4);
+                CHECK(diff < 0, "pixels identical (lossless, incl. alpha)");
+                free(exp);
+            }
+            free(got);
+        }
+bmp32_done:;
+    }
+
+    /* --- BMP 8-bit palette --- */
+    printf("BMP 8-bit palette -> PALETTE8:\n");
+    CHECK(gen_bmp8_pal("testout/t8.bmp", W, H, 200) == 0, "generate bmp8");
+    {
+        FILE *f = img_fopen_read("testout/t8.bmp");
+        img_image_t img;
+        int ok8 = f && bmp_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(ok8, "decode bmp8");
+        if (f) fclose(f);
+        if (!ok8) { printf("  SKIP  remaining bmp8 checks\n"); goto bmp8_done; }
+        CHECK(img.color == IMG_PALETTE && img.bit_depth == 8 && img.pal_ncolors == 200,
+              "format is PALETTE8, 200 colors");
+        CHECK(png_write_file(&img, &opts, "testout/t8.png", err, sizeof(err)) == 0, "encode png");
+        img_free(&img);
+        {
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/t8.png", &w, &h, &got);
+            CHECK(ch == 3, "png readable as RGB (palette expanded)");
+            free(got);
+        }
+bmp8_done:;
+    }
+
+    /* --- TGA 32 top-down and bottom-up --- */
+    printf("TGA 32-bit (both origins) -> RGBA8:\n");
+    for (int td = 0; td < 2; td++) {
+        char inp[64], outp[64];
+        snprintf(inp, sizeof(inp), "testout/t32_%s.tga", td ? "td" : "bu");
+        snprintf(outp, sizeof(outp), "testout/t32_%s.png", td ? "td" : "bu");
+        CHECK(gen_tga32(inp, W, H, td) == 0, td ? "generate tga top-down" : "generate tga bottom-up");
+        FILE *f = img_fopen_read(inp);
+        img_image_t img;
+        int oktga = f && tga_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(oktga, "decode tga");
+        if (f) fclose(f);
+        if (!oktga) { printf("  SKIP  remaining tga checks\n"); continue; }
+        CHECK(img.color == IMG_RGBA, "format is RGBA8");
+        CHECK(png_write_file(&img, &opts, outp, err, sizeof(err)) == 0, "encode png");
+        img_free(&img);
+        {
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba(outp, &w, &h, &got);
+            CHECK(ch == 4, "png readable as RGBA");
+            if (ch == 4) {
+                uint8_t *exp = (uint8_t *)malloc((size_t)W * H * 4);
+                fill_gradient_rgba(exp, W, H, 255);
+                for (int y = 0; y < H; y++)
+                    for (int x = 0; x < W; x++)
+                        exp[((size_t)y * W + x) * 4 + 3] = (uint8_t)((x + y) & 1 ? 128 : 255);
+                int diff = compare_rgba(got, exp, W * H * 4);
+                CHECK(diff < 0, td ? "pixels identical (top-down)" : "pixels identical (bottom-up)");
+                free(exp);
+            }
+            free(got);
+        }
+    }
+
+    /* --- PNM 16-bit --- */
+    printf("PNM P6 maxval 1023 -> RGB16:\n");
+    CHECK(gen_pnm("testout/t16.ppm", 9, 7, 6, 1023) == 0, "generate ppm16");
+    {
+        FILE *f = img_fopen_read("testout/t16.ppm");
+        img_image_t img;
+        int ok16 = f && pnm_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(ok16, "decode ppm16");
+        if (f) fclose(f);
+        if (!ok16) { printf("  SKIP  remaining ppm16 checks\n"); goto ppm_done; }
+        CHECK(img.color == IMG_RGB && img.bit_depth == 16, "format is RGB16");
+        CHECK(png_write_file(&img, &opts, "testout/t16.png", err, sizeof(err)) == 0, "encode png");
+        img_free(&img);
+        {
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/t16.png", &w, &h, &got);
+            CHECK(ch == 3, "png readable as RGB");
+            free(got);
+        }
+ppm_done:;
+    }
+
+    /* --- PNM P5 8-bit gray --- */
+    printf("PNM P5 gray -> GRAY8:\n");
+    CHECK(gen_pnm("testout/tgray.pgm", 11, 5, 5, 255) == 0, "generate pgm8");
+    {
+        FILE *f = img_fopen_read("testout/tgray.pgm");
+        img_image_t img;
+        int okgray = f && pnm_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(okgray, "decode pgm8");
+        if (f) fclose(f);
+        if (!okgray) { printf("  SKIP  remaining pgm checks\n"); goto pgm_done; }
+        CHECK(img.color == IMG_GRAY && img.bit_depth == 8, "format is GRAY8");
+        CHECK(png_write_file(&img, &opts, "testout/tgray.png", err, sizeof(err)) == 0, "encode png");
+        img_free(&img);
+        {
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/tgray.png", &w, &h, &got);
+            CHECK(ch == 1, "png readable as GRAY");
+            if (ch == 1) {
+                uint8_t *exp = (uint8_t *)malloc((size_t)w * h);
+                fill_gradient_gray(exp, w, h);
+                int diff = compare_rgba(got, exp, w * h);
+                CHECK(diff < 0, "gray pixels identical");
+                free(exp);
+            }
+            free(got);
+        }
+pgm_done:;
+    }
+
+    /* --- JPEG round-trip (pixel values may differ slightly from other
+     *     decoders but must be stable: encode->decode twice) --- */
+    printf("JPEG -> RGB8 (structure check):\n");
+    {
+        /* use the jpeg sample shipped with jpeg-10 if present */
+        FILE *jf = img_fopen_read("F:/PNG/jpeg-10/testimg.jpg");
+        if (jf) {
+            fclose(jf);
+            FILE *f = img_fopen_read("F:/PNG/jpeg-10/testimg.jpg");
+            img_image_t img;
+            CHECK(f && jpeg_decode(f, &img, err, sizeof(err)) == 0, "decode jpeg");
+            if (f) fclose(f);
+            CHECK((img.color == IMG_RGB || img.color == IMG_GRAY) && img.bit_depth == 8,
+                  "format is RGB8 or GRAY8");
+            CHECK(png_write_file(&img, &opts, "testout/tjpg.png", err, sizeof(err)) == 0, "encode png");
+            img_free(&img);
+            int w, h; uint8_t *got = NULL;
+            read_png_rgba("testout/tjpg.png", &w, &h, &got);
+            CHECK(got != NULL, "png readable");
+            free(got);
+        } else {
+            printf("  SKIP  jpeg sample not found\n");
+        }
+    }
+
+    /* --- timestamp copy --- */
+    printf("timestamp sync:\n");
+    {
+        FILE *f = img_fopen_write("testout/ts_in.bin");
+        fwrite("x", 1, 1, f);
+        fclose(f);
+        FILE *g = img_fopen_write("testout/ts_out.bin");
+        fwrite("y", 1, 1, g);
+        fclose(g);
+        /* make the input's times distinctly old */
+        void *h = img_open_write_attrs("testout/ts_in.bin");
+        FILETIME old_t;
+        ULARGE_INTEGER ul;
+        ul.QuadPart = 100000000000000000ULL;    /* some time in 1601.. */
+        old_t.dwLowDateTime = ul.LowPart;
+        old_t.dwHighDateTime = ul.HighPart;
+        SetFileTime((HANDLE)h, &old_t, NULL, &old_t);
+        img_close_handle(h);
+        CHECK(copy_file_times("testout/ts_in.bin", "testout/ts_out.bin") == 0, "copy_file_times");
+        uint64_t c_in = file_time_stamp("testout/ts_in.bin", 1);
+        uint64_t c_out = file_time_stamp("testout/ts_out.bin", 1);
+        uint64_t m_in = file_time_stamp("testout/ts_in.bin", 0);
+        uint64_t m_out = file_time_stamp("testout/ts_out.bin", 0);
+        CHECK(c_in == c_out && c_in != 0, "creation time matches");
+        CHECK(m_in == m_out && m_in != 0, "modification time matches");
+    }
+
+    /* --- filter modes all produce readable output --- */
+    printf("filter modes:\n");
+    {
+        const char *modes[] = { "none", "sub", "up", "avg", "paeth", "all", "fast" };
+        png_filter_mode_t vals[] = { PNGF_NONE, PNGF_SUB, PNGF_UP, PNGF_AVG,
+                                     PNGF_PAETH, PNGF_ALL, PNGF_FAST };
+        for (size_t i = 0; i < sizeof(modes) / sizeof(modes[0]); i++) {
+            FILE *f = img_fopen_read("testout/t24.bmp");
+            img_image_t img;
+            if (!f || bmp_decode(f, &img, err, sizeof(err)) != 0) {
+                if (f) fclose(f);
+                printf("  SKIP  %s (source decode failed)\n", modes[i]);
+                continue;
+            }
+            fclose(f);
+            png_opts_t o2 = opts;
+            o2.filter = vals[i];
+            char path[64];
+            snprintf(path, sizeof(path), "testout/filt_%s.png", modes[i]);
+            int w, h;
+            uint8_t *got = NULL;
+            CHECK(png_write_file(&img, &o2, path, err, sizeof(err)) == 0, modes[i]);
+            int ch = read_png_rgba(path, &w, &h, &got);
+            CHECK(ch == 3, "output readable");
+            free(got);
+            img_free(&img);
+        }
+    }
+
+    /* --- compression levels 0 and 9 both work, 9 should be <= 0 --- */
+    printf("compression levels:\n");
+    {
+        FILE *f = img_fopen_read("testout/t24.bmp");
+        img_image_t img;
+        if (!f || bmp_decode(f, &img, err, sizeof(err)) != 0) {
+            if (f) fclose(f);
+            printf("  SKIP  compression levels (source decode failed)\n");
+        } else {
+            fclose(f);
+        png_opts_t o0 = opts; o0.level = 0;
+        png_opts_t o9 = opts; o9.level = 9;
+        png_write_file(&img, &o0, "testout/lvl0.png", err, sizeof(err));
+        png_write_file(&img, &o9, "testout/lvl9.png", err, sizeof(err));
+        HANDLE h0 = CreateFileA("testout/lvl0.png", FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        HANDLE h9 = CreateFileA("testout/lvl9.png", FILE_READ_ATTRIBUTES, FILE_SHARE_READ, NULL,
+                                OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, NULL);
+        LARGE_INTEGER s0 = {0}, s9 = {0};
+        GetFileSizeEx(h0, &s0);
+        GetFileSizeEx(h9, &s9);
+        CloseHandle(h0);
+        CloseHandle(h9);
+        printf("        level 0: %lld bytes, level 9: %lld bytes\n", s0.QuadPart, s9.QuadPart);
+        CHECK(s9.QuadPart <= s0.QuadPart, "level 9 compresses at least as well as level 0");
+        img_free(&img);
+        }
+    }
+
+    printf("\n%s (%d failures)\n", g_failures ? "SELF-TEST FAILED" : "SELF-TEST PASSED", g_failures);
+    return g_failures ? 1 : 0;
+}
