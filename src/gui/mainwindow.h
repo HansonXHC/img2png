@@ -2,6 +2,7 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QLabel>
 #include <QLineEdit>
 #include <QRunnable>
 #include <QCheckBox>
@@ -11,6 +12,12 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+
+/* Current UI language: "zh" or "en" (shared with worker threads). */
+extern QString g_lang;
+
+/* Pick a string by current language: tr2("中文", "English"). */
+QString tr2(const char *zh, const char *en);
 
 /* Line edit that accepts a dragged folder (or file -> its parent dir)
  * and fills itself with that path. */
@@ -43,10 +50,12 @@ private slots:
     void pickOutDir();
     void runConversion();
     void logResult(const QString &line);
+    void onLanguageChanged();
 
 private:
     void log(const QString &line);
     void addPath(const QString &path);
+    void applyTexts();
 
     QListWidget *fileList_;
     QSlider *levelSlider_;
@@ -58,6 +67,18 @@ private:
     DropPathEdit *outDirEdit_;
     QPushButton *convertBtn_;
     QPlainTextEdit *logView_;
+
+    /* translatable widgets */
+    QLabel *labelFileList_;
+    QPushButton *btnAdd_;
+    QPushButton *btnAddDir_;
+    QPushButton *btnClear_;
+    QLabel *labelLevel_;
+    QLabel *labelFilter_;
+    QLabel *labelThreads_;
+    QLabel *labelOutDir_;
+    QPushButton *btnBrowse_;
+
     int pending_;
     int failures_;
 };

@@ -102,6 +102,7 @@ from different subdirectories would overwrite each other.
 
 - Drag & drop **files or folders** onto the window (folders are scanned recursively), or use "Add files…" / "Add folder…"
 - Compression level slider 0–9 (default 9), filter dropdown (default "adaptive"), thread count
+- **UI language**: 中文/English dropdown (top right of the window) — applies instantly and is remembered (default: Chinese)
 - "Match source bit depth strictly" (checked by default; unchecking enables auto-optimization), "keep timestamps" (default checked)
 - **"Overwrite originals"** (unchecked by default):
   - when the output path equals the input path, unchecked skips the file with a notice; checked allows in-place overwriting (lossless, timestamps kept)
