@@ -201,7 +201,11 @@ if(IMG2PNG_GUI)
         message(STATUS "img2png: Qt6 not found, building CLI only (-DIMG2PNG_GUI=OFF to silence)")
         set(IMG2PNG_GUI OFF)
     else()
-        # Qt < 6.3 (e.g. ubuntu-22.04 packages) does not provide this command
+        # Qt < 6.3 (e.g. ubuntu-22.04 packages) does not provide this command,
+        # so set up what it does for us explicitly:
+        set(CMAKE_AUTOMOC ON)
+        set(CMAKE_AUTORCC ON)
+        set(CMAKE_AUTOUIC ON)
         if(COMMAND qt_standard_project_setup)
             qt_standard_project_setup()
         endif()

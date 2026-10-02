@@ -96,7 +96,9 @@ int get_file_times(const char *path, void *ctime_out, void *mtime_out)
     pack_timespec(ctime_out, st.st_mtime, 0);
 #endif
     long nsec = 0;
-#if defined(__linux__) || defined(__APPLE__)
+#if defined(__APPLE__)
+    nsec = (long)st.st_mtimespec.tv_nsec;
+#elif defined(__linux__)
     nsec = (long)st.st_mtim.tv_nsec;
 #endif
     pack_timespec(mtime_out, st.st_mtime, nsec);

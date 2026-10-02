@@ -27,17 +27,13 @@ jobs:
             mingw-w64-x86_64-gcc
             mingw-w64-x86_64-cmake
             mingw-w64-x86_64-ninja
-
-      - uses: jurplel/install-qt-action@v4
-        with:
-          version: '6.7.*'
-          archives: qtbase icu
-          cache: true
+            mingw-w64-x86_64-qt6-base
+            mingw-w64-x86_64-qt6-tools
 
       - name: Configure
         run: |
           cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release \
-            -DCMAKE_PREFIX_PATH="$QT_ROOT_DIR"
+            -DCMAKE_PREFIX_PATH=/mingw64
 
       - name: Build
         run: cmake --build build
@@ -49,7 +45,8 @@ jobs:
         run: |
           mkdir -p pkg/img2png-v${{ github.ref_name }}
           cp build/img2png.exe build/img2png-gui.exe pkg/img2png-v${{ github.ref_name }}/
-          windeployqt --release --compiler-runtime --no-translations \
+          WDEP=$(command -v windeployqt || command -v windeployqt6)
+          "$WDEP" --release --no-translations \
             --no-system-d3d-compiler --no-opengl-sw \
             "pkg/img2png-v${{ github.ref_name }}/img2png-gui.exe"
           rm -rf pkg/img2png-v${{ github.ref_name }}/tls \
