@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(img2png VERSION 1.0.1 LANGUAGES C CXX)
+project(img2png VERSION 1.1.0 LANGUAGES C CXX)
 
 option(IMG2PNG_GUI "Build the Qt GUI" ON)
 option(IMG2PNG_TESTS "Build tests" ON)
