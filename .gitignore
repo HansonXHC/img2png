@@ -1,11 +1,10 @@
-# build directories
-build/
-build-*/
-*-build/
+# build directories (root-anchored: thirdparty/tiff/build must stay tracked)
+/build/
+/build-*/
 _deps/
 
 # test output
-testout/
+/testout/
 
 # local IDE / OS junk
 .vs/
