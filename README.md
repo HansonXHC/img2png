@@ -2,7 +2,7 @@
 
 English | [中文](README.zh.md)
 
-A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6.59 and libjpeg-turbo 3.2.0.
+A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6.59, libjpeg-turbo 3.2.0, giflib, libwebp and libtiff.
 
 ## Features
 
@@ -28,6 +28,10 @@ A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6
 | PNM color (P3/P6) | RGB, maxval>255 → 16-bit |
 | JPEG grayscale / color | GRAY / RGB |
 | ICO | largest entry decoded; embedded BMP/PNG keeps its color type and depth |
+| GIF | first frame; PALETTE8 with transparency (tRNS) |
+| QOI | 8-bit RGB / RGBA |
+| WebP | 8-bit RGB / RGBA (lossy & lossless) |
+| TIFF | 8-bit RGBA via the RGBA interface (all photometric variants) |
 | PNG | re-encoded with the current settings (lossless) |
 
 `--auto` optimization mode (off by default): drop a fully-opaque alpha channel, collapse pure-grayscale RGB to GRAY.
@@ -60,6 +64,11 @@ cmake -S . -B build -G Ninja -DIMG2PNG_GUI=OFF \
   -DZLIB_SOURCE_DIR=<zlib source dir> \
   -DLIBPNG_SOURCE_DIR=<libpng source dir> \
   -DLIBJPEG_PREBUILT_DIR=<libjpeg-turbo install dir (with include/ and lib/)>
+```
+
+GIF/QOI/WebP/TIFF support is built in via vendored `thirdparty/` sources — nothing
+extra to install. libtiff is configured without optional codecs (deflate is kept via
+the vendored zlib).
 ```
 
 `LIBJPEG_PREBUILT_DIR` may also point at an extracted official libjpeg-turbo Windows

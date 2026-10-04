@@ -140,7 +140,7 @@ static void job_run(void *arg)
 static void usage(void)
 {
     fprintf(stderr,
-        "img2png - convert BMP/TGA/PNM/ICO/JPEG/PNG images to PNG (lossless)\n\n"
+        "img2png - convert BMP/TGA/PNM/ICO/JPEG/PNG/GIF/QOI/WebP/TIFF images to PNG (lossless)\n\n"
         "usage: img2png [options] file-or-folder...\n"
         "  -o PATH        output file (single input) or output directory (batch)\n"
         "  -l 0-9         zlib compression level (default 9 = best)\n"

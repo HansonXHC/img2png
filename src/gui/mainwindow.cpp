@@ -234,9 +234,9 @@ MainWindow::MainWindow(QWidget *parent)
 void MainWindow::applyTexts()
 {
     setWindowTitle(tr2("img2png - 图片转 PNG", "img2png - Image to PNG"));
-    labelFileList_->setText(tr2("待转换文件/文件夹（可拖拽添加，支持 BMP/TGA/PNM/ICO/JPEG/PNG，"
+    labelFileList_->setText(tr2("待转换文件/文件夹（可拖拽添加，支持 BMP/TGA/PNM/ICO/JPEG/PNG/GIF/QOI/WebP/TIFF，"
                                 "文件夹递归扫描）：",
-                                "Files/folders to convert (drag & drop; BMP/TGA/PNM/ICO/JPEG/PNG; "
+                                "Files/folders to convert (drag & drop; BMP/TGA/PNM/ICO/JPEG/PNG/GIF/QOI/WebP/TIFF; "
                                 "folders are scanned recursively):"));
     btnAdd_->setText(tr2("添加文件…", "Add files…"));
     btnAddDir_->setText(tr2("添加文件夹…", "Add folder…"));
@@ -308,7 +308,8 @@ static void collectImages(const QString &path, QStringList *out)
         return;
     QString ext = fi.suffix().toLower();
     static const char *kExts[] = { "bmp", "dib", "tga", "pnm", "ppm", "pgm",
-                                   "pbm", "ico", "jpg", "jpeg", "jfif", "png" };
+                                   "pbm", "ico", "jpg", "jpeg", "jfif", "png",
+                                   "gif", "qoi", "webp", "tif", "tiff" };
     for (const char *e : kExts) {
         if (ext == QLatin1String(e)) {
             out->append(QDir::toNativeSeparators(fi.absoluteFilePath()));
@@ -356,8 +357,8 @@ void MainWindow::addFiles()
 {
     QStringList files = QFileDialog::getOpenFileNames(
         this, tr2("选择要转换的图片", "Select images to convert"), QString(),
-        tr2("图片 (*.bmp *.dib *.tga *.pnm *.ppm *.pgm *.pbm *.ico *.jpg *.jpeg *.jfif *.png);;所有文件 (*)",
-            "Images (*.bmp *.dib *.tga *.pnm *.ppm *.pgm *.pbm *.ico *.jpg *.jpeg *.jfif *.png);;All files (*)"));
+        tr2("图片 (*.bmp *.dib *.tga *.pnm *.ppm *.pgm *.pbm *.ico *.jpg *.jpeg *.jfif *.png *.gif *.qoi *.webp *.tif *.tiff);;所有文件 (*)",
+            "Images (*.bmp *.dib *.tga *.pnm *.ppm *.pgm *.pbm *.ico *.jpg *.jpeg *.jfif *.png *.gif *.qoi *.webp *.tif *.tiff);;All files (*)"));
     for (const QString &f : files)
         addPath(f);
 }

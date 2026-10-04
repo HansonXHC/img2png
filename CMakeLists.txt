@@ -148,6 +148,52 @@ else()
 endif()
 
 # ---------------------------------------------------------------------------
+# extra image codecs: giflib (vendored subset), qoi (header-only),
+# libwebp and libtiff (vendored, CMake)
+# ---------------------------------------------------------------------------
+add_library(giflib_v STATIC
+    thirdparty/giflib/dgif_lib.c
+    thirdparty/giflib/egif_lib.c
+    thirdparty/giflib/gif_err.c
+    thirdparty/giflib/gifalloc.c
+    thirdparty/giflib/openbsd-reallocarray.c
+    thirdparty/giflib/qprintf.c
+    thirdparty/giflib/gif_hash.c
+)
+target_include_directories(giflib_v PUBLIC thirdparty/giflib)
+
+add_library(qoi INTERFACE)
+target_include_directories(qoi INTERFACE thirdparty/qoi)
+
+set(WEBP_BUILD_ANIM_UTILS OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_CWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_DWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_GIF2WEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_IMG2WEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_VWEBP OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBPINFO OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_LIBWEBPMUX OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_WEBPMUX OFF CACHE BOOL "" FORCE)
+set(WEBP_BUILD_EXTRAS OFF CACHE BOOL "" FORCE)
+add_subdirectory(thirdparty/libwebp libwebp-build)
+
+set(tiff-static ON CACHE BOOL "" FORCE)
+set(tiff-tools OFF CACHE BOOL "" FORCE)
+set(tiff-tests OFF CACHE BOOL "" FORCE)
+set(tiff-contrib OFF CACHE BOOL "" FORCE)
+set(tiff-docs OFF CACHE BOOL "" FORCE)
+set(tiff-cxx OFF CACHE BOOL "" FORCE)
+set(jpeg OFF CACHE BOOL "" FORCE)
+set(old-jpeg OFF CACHE BOOL "" FORCE)
+set(webp OFF CACHE BOOL "" FORCE)
+set(zstd OFF CACHE BOOL "" FORCE)
+set(lzma OFF CACHE BOOL "" FORCE)
+set(jbig OFF CACHE BOOL "" FORCE)
+set(pixarlog OFF CACHE BOOL "" FORCE)
+set(lerc OFF CACHE BOOL "" FORCE)
+add_subdirectory(thirdparty/tiff tiff-build)
+
+# ---------------------------------------------------------------------------
 # img2png core
 # ---------------------------------------------------------------------------
 add_library(img2png_core STATIC
@@ -158,6 +204,10 @@ add_library(img2png_core STATIC
     src/dec/pngdec.c
     src/dec/ico.c
     src/dec/jpeg.c
+    src/dec/gif.c
+    src/dec/qoi.c
+    src/dec/webp.c
+    src/dec/tiff.c
     src/enc/pngenc.c
     src/convert.c
     src/util/threads.c
@@ -171,7 +221,8 @@ if(NOT WIN32)
     target_link_libraries(img2png_core PUBLIC Threads::Threads)
 endif()
 
-target_link_libraries(img2png_core PUBLIC ${IMG2PNG_PNG_TARGET} ${IMG2PNG_JPEG_TARGET})
+target_link_libraries(img2png_core PUBLIC ${IMG2PNG_PNG_TARGET} ${IMG2PNG_JPEG_TARGET}
+    giflib_v qoi webp tiff)
 
 # libjpeg-turbo's targets don't carry PUBLIC include dirs (upstream expects
 # an install layout), so add them directly for source-tree integrations

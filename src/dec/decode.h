@@ -28,6 +28,12 @@ int jpeg_decode(FILE *f, img_image_t *img, char *err, size_t errlen);
 int png_decode_mem(const uint8_t *data, size_t size, img_image_t *img,
                    char *err, size_t errlen);
 
+/* Newer formats (vendored codecs) */
+int gif_decode(FILE *f, img_image_t *img, char *err, size_t errlen);
+int qoi_decode_file(FILE *f, img_image_t *img, char *err, size_t errlen);
+int webp_decode(FILE *f, img_image_t *img, char *err, size_t errlen);
+int tiff_decode(FILE *f, img_image_t *img, char *err, size_t errlen);
+
 /* Image-level optimizations for --auto mode: drops a fully opaque alpha
  * channel and converts gray-looking RGB to GRAY in place.  Returns 1 if
  * the image was modified. */

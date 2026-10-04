@@ -2,7 +2,7 @@
 
 [English](README.md) | 中文
 
-多格式图片转 PNG 的小工具（CLI + GUI），支持 BMP / TGA / PNM / ICO / JPEG / PNG 输入。
+多格式图片转 PNG 的小工具（CLI + GUI），支持 BMP / TGA / PNM / ICO / JPEG / PNG / GIF / QOI / WebP / TIFF 输入。
 基于 libpng 1.6.59 与 libjpeg-turbo 3.2.0，全部转换**无损**。
 
 ## 特性
@@ -28,6 +28,10 @@
 | PNM 彩色（P3/P6） | RGB，maxval>255 → 16 位 |
 | JPEG 灰度 / 彩色 | GRAY / RGB |
 | ICO | 取最大分辨率条目，内嵌 BMP/PNG 按原色型位深输出 |
+| GIF | 取第一帧；PALETTE8，透明色转 tRNS |
+| QOI | 8 位 RGB / RGBA |
+| WebP | 8 位 RGB / RGBA（有损与无损） |
+| TIFF | 经 RGBA 接口统一输出 8 位 RGBA（各光度变体通吃） |
 | PNG | 按当前设置重新编码（无损） |
 
 `--auto` 优化模式（默认关闭）：去掉完全无用的 alpha 通道、纯灰度图降为 GRAY。

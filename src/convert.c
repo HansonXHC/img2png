@@ -16,7 +16,8 @@
 #endif
 #include "util/platform.h"
 
-typedef enum { FMT_UNKNOWN = 0, FMT_BMP, FMT_TGA, FMT_PNM, FMT_ICO, FMT_JPEG, FMT_PNG } fmt_t;
+typedef enum { FMT_UNKNOWN = 0, FMT_BMP, FMT_TGA, FMT_PNM, FMT_ICO, FMT_JPEG,
+               FMT_PNG, FMT_GIF, FMT_QOI, FMT_WEBP, FMT_TIFF } fmt_t;
 
 static fmt_t fmt_from_ext(const char *path)
 {
@@ -35,6 +36,10 @@ static fmt_t fmt_from_ext(const char *path)
     if (!img_stricmp(dot, "jpg") || !img_stricmp(dot, "jpeg") ||
         !img_stricmp(dot, "jfif"))                         return FMT_JPEG;
     if (!img_stricmp(dot, "png"))                          return FMT_PNG;
+    if (!img_stricmp(dot, "gif"))                          return FMT_GIF;
+    if (!img_stricmp(dot, "qoi"))                          return FMT_QOI;
+    if (!img_stricmp(dot, "webp"))                         return FMT_WEBP;
+    if (!img_stricmp(dot, "tif") || !img_stricmp(dot, "tiff")) return FMT_TIFF;
     return FMT_UNKNOWN;
 }
 
@@ -50,6 +55,10 @@ static fmt_t sniff_format(const char *path)
     if (n >= 2 && b[0] == 0xFF && b[1] == 0xD8) return FMT_JPEG;
     if (n >= 4 && b[0] == 0 && b[1] == 0 && b[2] == 1 && b[3] == 0) return FMT_ICO;
     if (n >= 2 && b[0] == 'P' && b[1] >= '1' && b[1] <= '6') return FMT_PNM;
+    if (n >= 6 && !memcmp(b, "GIF8", 4)) return FMT_GIF;
+    if (n >= 4 && !memcmp(b, "qoif", 4)) return FMT_QOI;
+    if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WEBP", 4)) return FMT_WEBP;
+    if (n >= 4 && ((!memcmp(b, "II*", 3) && 1) || 0)) return FMT_TIFF; /* placeholder */
     return FMT_UNKNOWN;
 }
 
@@ -165,6 +174,10 @@ int img2png_convert(const char *in_path, const char *out_path,
         case FMT_PNM:  rc = pnm_decode(f, &img, result->err, sizeof(result->err)); break;
         case FMT_ICO:  rc = ico_decode(f, &img, result->err, sizeof(result->err)); break;
         case FMT_JPEG: rc = jpeg_decode(f, &img, result->err, sizeof(result->err)); break;
+        case FMT_GIF:  rc = gif_decode(f, &img, result->err, sizeof(result->err)); break;
+        case FMT_QOI:  rc = qoi_decode_file(f, &img, result->err, sizeof(result->err)); break;
+        case FMT_WEBP: rc = webp_decode(f, &img, result->err, sizeof(result->err)); break;
+        case FMT_TIFF: rc = tiff_decode(f, &img, result->err, sizeof(result->err)); break;
         default:
             snprintf(result->err, sizeof(result->err), "unsupported input format");
             rc = -1;

@@ -16,8 +16,13 @@
 #include "enc/pngenc.h"
 #include "util/filetime.h"
 #include "util/pngerr.h"
+#include <gif_lib.h>
+#include <qoi.h>
+#include <webp/encode.h>
+#include <tiffio.h>
 
 static int g_failures = 0;
+static uint8_t *wp_blob = NULL;
 
 #define CHECK(cond, name)                                                  \
     do {                                                                   \
@@ -286,6 +291,10 @@ static int compare_rgba(const uint8_t *a, const uint8_t *b, int n)
             return i;
     return -1;
 }
+
+static uint8_t pal_gif_r(int i) { static const uint8_t v[4] = {255,0,0,10};  return v[i]; }
+static uint8_t pal_gif_g(int i) { static const uint8_t v[4] = {0,255,0,20};  return v[i]; }
+static uint8_t pal_gif_b(int i) { static const uint8_t v[4] = {0,0,255,30};  return v[i]; }
 
 static uint64_t file_time_stamp(const char *path, int create)
 {
@@ -607,6 +616,176 @@ pgm_done:;
         printf("        level 0: %lld bytes, level 9: %lld bytes\n", s0, s9);
         CHECK(s9 <= s0, "level 9 compresses at least as well as level 0");
         img_free(&img);
+        }
+    }
+
+
+    /* --- GIF: encode with giflib (palette + transparency), decode back --- */
+    printf("GIF -> PALETTE8 with transparency:\n");
+    {
+        int ge = 0;
+        GifFileType *gf = EGifOpenFileName("testout/t.gif", 0, &ge);
+        CHECK(gf != NULL, "open gif for writing");
+        if (gf) {
+            GifColorType pal[4] = {{255,0,0},{0,255,0},{0,0,255},{10,20,30}};
+            ColorMapObject *cm = GifMakeMapObject(4, pal);
+            CHECK(EGifPutScreenDesc(gf, 4, 4, 2, 0, cm) == GIF_OK, "gif screen desc");
+            /* the GCB extension must precede the image descriptor */
+            GraphicsControlBlock gcb;
+            memset(&gcb, 0, sizeof(gcb));
+            gcb.DisposalMode = DISPOSE_DO_NOT;
+            gcb.TransparentColor = 3;
+            uint8_t gcb_buf[8];
+            int gcb_len = EGifGCBToExtension(&gcb, gcb_buf);
+            CHECK(EGifPutExtension(gf, GRAPHICS_EXT_FUNC_CODE, gcb_len, gcb_buf) == GIF_OK,
+                  "gif transparency extension");
+            CHECK(EGifPutImageDesc(gf, 0, 0, 4, 4, 0, NULL) == GIF_OK, "gif image desc");
+            uint8_t raster[16];
+            for (int i = 0; i < 16; i++) raster[i] = (uint8_t)(i % 4);
+            CHECK(EGifPutLine(gf, raster, 16) == GIF_OK, "gif pixels");
+            CHECK(EGifCloseFile(gf, &ge) == GIF_OK, "close gif");
+            GifFreeMapObject(cm);
+        }
+
+        FILE *f = img_fopen_read("testout/t.gif");
+        img_image_t img;
+        int okgif = f && gif_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(okgif, "decode gif");
+        if (f) fclose(f);
+        if (okgif) {
+            CHECK(img.color == IMG_PALETTE && img.bit_depth == 8, "format is PALETTE8");
+            CHECK(img.has_pal_alpha && img.pal_alpha[3] == 0, "transparency preserved");
+            int idx_ok = 1;
+            for (int i = 0; i < 16; i++)
+                if (img.data[i] != (uint8_t)(i % 4)) { idx_ok = 0; break; }
+            CHECK(idx_ok, "indices identical");
+            CHECK(png_write_file(&img, &opts, "testout/tgif.png", err, sizeof(err)) == 0, "encode png");
+            img_free(&img);
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/tgif.png", &w, &h, &got);
+            CHECK(ch == 4, "png readable as RGBA");
+            if (ch == 4) {
+                uint8_t *exp = (uint8_t *)malloc((size_t)w * h * 4);
+                for (int i = 0; i < w * h; i++) {
+                    int idx = i % 4;
+                    exp[i*4+0] = pal_gif_r(idx); exp[i*4+1] = pal_gif_g(idx); exp[i*4+2] = pal_gif_b(idx);
+                    exp[i*4+3] = (idx == 3) ? 0 : 255;
+                }
+                CHECK(compare_rgba(got, exp, w * h * 4) < 0, "pixels identical (lossless)");
+                free(exp);
+            }
+            free(got);
+        }
+    }
+
+    /* --- QOI --- */
+    printf("QOI -> RGBA8:\n");
+    {
+        qoi_desc desc;
+        desc.width = 6; desc.height = 4; desc.channels = 4; desc.colorspace = QOI_SRGB;
+        uint8_t px[6 * 4 * 4];
+        for (int i = 0; i < 6 * 4; i++) {
+            px[i*4+0] = (uint8_t)(i * 7); px[i*4+1] = (uint8_t)(i * 3);
+            px[i*4+2] = (uint8_t)(i * 11); px[i*4+3] = (uint8_t)(i & 1 ? 128 : 255);
+        }
+        int enclen = 0;
+        void *enc = qoi_encode(px, &desc, &enclen);
+        CHECK(enc != NULL, "qoi_encode");
+        if (enc) {
+            FILE *f = img_fopen_write("testout/t.qoi");
+            int wok = f && fwrite(enc, 1, (size_t)enclen, f) == (size_t)enclen;
+            if (f) fclose(f);
+            free(enc);
+            CHECK(wok, "write qoi");
+            f = img_fopen_read("testout/t.qoi");
+            img_image_t img;
+            int okq = f && qoi_decode_file(f, &img, err, sizeof(err)) == 0;
+            CHECK(okq, "decode qoi");
+            if (f) fclose(f);
+            if (okq) {
+                CHECK(img.color == IMG_RGBA && img.width == 6 && img.height == 4, "format is RGBA8 6x4");
+                int diff = compare_rgba(img.data, px, 6 * 4 * 4);
+                CHECK(diff < 0, "pixels identical (lossless)");
+                png_write_file(&img, &opts, "testout/tqoi.png", err, sizeof(err));
+                img_free(&img);
+            }
+        }
+    }
+
+    /* --- WebP (encode sample, decode, verify round-trip readability) --- */
+    printf("WebP -> RGBA8:\n");
+    {
+        uint8_t px[8 * 5 * 4];
+        for (int i = 0; i < 8 * 5; i++) {
+            px[i*4+0] = (uint8_t)(i * 5); px[i*4+1] = (uint8_t)(255 - i * 5);
+            px[i*4+2] = (uint8_t)((i * 13) & 0xFF); px[i*4+3] = (uint8_t)(i & 1 ? 200 : 255);
+        }
+        int wpsize = WebPEncodeRGBA(px, 8, 5, 8 * 4, 70.0f, &wp_blob);
+        CHECK(wpsize > 0, "WebPEncodeRGBA");
+        if (wpsize > 0) {
+            FILE *f = img_fopen_write("testout/t.webp");
+            int wok = f && fwrite(wp_blob, 1, (size_t)wpsize, f) == (size_t)wpsize;
+            if (f) fclose(f);
+            free(wp_blob);
+            wp_blob = NULL;
+            CHECK(wok, "write webp");
+            f = img_fopen_read("testout/t.webp");
+            img_image_t img;
+            int okw = f && webp_decode(f, &img, err, sizeof(err)) == 0;
+            CHECK(okw, "decode webp");
+            if (f) fclose(f);
+            if (okw) {
+                CHECK(img.color == IMG_RGBA && img.width == 8 && img.height == 5, "format is RGBA8 8x5");
+                CHECK(png_write_file(&img, &opts, "testout/twebp.png", err, sizeof(err)) == 0, "encode png");
+                img_free(&img);
+                int w, h; uint8_t *got = NULL;
+                int ch = read_png_rgba("testout/twebp.png", &w, &h, &got);
+                CHECK(ch == 4, "png readable as RGBA");
+                free(got);
+            }
+        }
+    }
+
+    /* --- TIFF (RGB, written with libtiff) --- */
+    printf("TIFF -> RGBA8:\n");
+    {
+        TIFF *tf = TIFFOpen("testout/t.tiff", "w");
+        CHECK(tf != NULL, "open tiff for writing");
+        if (tf) {
+            TIFFSetField(tf, TIFFTAG_IMAGEWIDTH, 5);
+            TIFFSetField(tf, TIFFTAG_IMAGELENGTH, 3);
+            TIFFSetField(tf, TIFFTAG_BITSPERSAMPLE, 8);
+            TIFFSetField(tf, TIFFTAG_SAMPLESPERPIXEL, 3);
+            TIFFSetField(tf, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_RGB);
+            TIFFSetField(tf, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            uint8_t row[5 * 3];
+            int wok = 1;
+            for (int y = 0; y < 3 && wok; y++) {
+                for (int x = 0; x < 5; x++) {
+                    row[x*3+0] = (uint8_t)(x * 40); row[x*3+1] = (uint8_t)(y * 80); row[x*3+2] = 77;
+                }
+                wok = TIFFWriteScanline(tf, row, (uint32_t)y, 0) >= 0;
+            }
+            CHECK(wok, "write tiff scanlines");
+            TIFFClose(tf);
+        }
+        FILE *f = img_fopen_read("testout/t.tiff");
+        img_image_t img;
+        int okt = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(okt, "decode tiff");
+        if (f) fclose(f);
+        if (okt) {
+            CHECK(img.color == IMG_RGBA && img.width == 5 && img.height == 3, "format is RGBA8 5x3");
+            int diff = -1;
+            for (int y = 0; y < 3 && diff < 0; y++)
+                for (int x = 0; x < 5 && diff < 0; x++) {
+                    uint8_t *d = img.data + ((size_t)y * 5 + x) * 4;
+                    if (d[0] != (uint8_t)(x * 40) || d[1] != (uint8_t)(y * 80) || d[2] != 77 || d[3] != 255)
+                        diff = y * 5 + x;
+                }
+            CHECK(diff < 0, "pixels identical (lossless)");
+            png_write_file(&img, &opts, "testout/ttiff.png", err, sizeof(err));
+            img_free(&img);
         }
     }
 
