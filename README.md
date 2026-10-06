@@ -60,17 +60,19 @@ JPEG / PNG / GIF / QOI / WebP / TIFF / HEIF / AVIF**, writes lossless PNG — or
 | BMP 24-bit | 8-bit RGB |
 | BMP 32-bit (with alpha mask) | 8-bit RGBA |
 | BMP 32-bit (no mask, BI_RGB) | 8-bit RGB (the 4th byte is undefined — not treated as alpha) |
-| TGA 8-bit gray / 24-bit / 32-bit | GRAY / RGB / RGBA |
-| PNM grayscale (P1/P2/P4/P5) | GRAY (PBM keeps 1-bit); maxval > 255 → 16-bit |
-| PNM color (P3/P6) | RGB; maxval > 255 → 16-bit |
+| TGA palette (8-bit indices) | PALETTE8 (entries carrying alpha become tRNS; 15/16-bit color-map entries are expanded to 8-bit and their 1-bit alpha is dropped) |
+| TGA 8-bit gray / 16-bit gray (gray+alpha) | GRAY8 / GRAY_ALPHA8 |
+| TGA 24-bit / 32-bit | RGB8 / RGBA8 (a 32-bit image whose descriptor alpha size is not 8 is treated as RGB) |
+| PNM grayscale (P1/P2/P4/P5) | GRAY (PBM keeps 1-bit); maxval > 255 → 16-bit, samples scaled to the full range |
+| PNM color (P3/P6) | RGB; maxval > 255 → 16-bit, samples scaled to the full range |
 | JPEG grayscale / color | GRAY / RGB |
 | PNG | color type and bit depth preserved (1/2/4/8/16, palette tRNS, gray tRNS); RGB+tRNS expands to RGBA so the transparency survives |
-| GIF | single-frame GIFs → PALETTE8 with tRNS; animated GIFs → APNG (see above) |
+| GIF | single-frame GIFs → PALETTE8 with tRNS (the palette is not narrowed to 1/2/4-bit for images with few colors); animated GIFs → APNG (see above) |
 | ICO | largest entry decoded; an embedded BMP/PNG keeps its color type and depth. An AND mask that carries transparency promotes 24/32-bit entries to RGBA, and gives palette entries tRNS |
 | QOI | 8-bit RGB / RGBA |
 | WebP | 8-bit RGB / RGBA (lossy and lossless) |
 | TIFF | bit-depth matched for contiguous images: gray 1/2/4/8/16, palette 1/2/4/8, RGB/RGBA 8/16. Other variants (CMYK, YCbCr, tiled, separate planes, float) fall back to 8-bit RGBA through the RGBA interface |
-| HEIF / AVIF | 8-bit RGB → 8-bit RGBA; 10/12-bit sources → 16-bit RGBA |
+| HEIF / AVIF | 8-bit sources → 8-bit RGBA; 10/12-bit sources → 16-bit RGBA (scaled up to 16-bit, not bit-shifted) |
 
 `--auto` optimization mode (off by default) additionally drops a fully opaque alpha channel
 and collapses pure-grayscale RGB to GRAY.

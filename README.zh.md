@@ -54,17 +54,19 @@ QOI / WebP / TIFF / HEIF / AVIF** 输入，输出无损 PNG；输入是动图 GI
 | BMP 24 位 | 8 位 RGB |
 | BMP 32 位（有 alpha 掩码） | 8 位 RGBA |
 | BMP 32 位（无掩码，BI_RGB） | 8 位 RGB（第 4 字节无定义，不当作 alpha） |
-| TGA 8 位灰度 / 24 位 / 32 位 | GRAY / RGB / RGBA |
-| PNM 灰度（P1/P2/P4/P5） | GRAY（PBM 保留 1 位）；maxval > 255 → 16 位 |
-| PNM 彩色（P3/P6） | RGB；maxval > 255 → 16 位 |
+| TGA 调色板（8 位索引） | PALETTE8（色表项含 alpha 时转 tRNS；15/16 位色表项扩为 8 位，其 1 位 alpha 丢弃） |
+| TGA 8 位灰度 / 16 位灰度（灰度+alpha） | GRAY8 / GRAY_ALPHA8 |
+| TGA 24 位 / 32 位 | RGB8 / RGBA8（32 位但描述符中的 alpha 位数非 8 时按 RGB 处理） |
+| PNM 灰度（P1/P2/P4/P5） | GRAY（PBM 保留 1 位）；maxval > 255 → 16 位，数值缩放到满量程 |
+| PNM 彩色（P3/P6） | RGB；maxval > 255 → 16 位，数值缩放到满量程 |
 | JPEG 灰度 / 彩色 | GRAY / RGB |
 | PNG | 原色型与位深原样保留（1/2/4/8/16、调色板 tRNS、灰度 tRNS）；RGB+tRNS 扩为 RGBA 以保住透明 |
-| GIF | 单帧 GIF → PALETTE8（透明色转 tRNS）；动图 GIF → APNG（见上文） |
+| GIF | 单帧 GIF → PALETTE8（透明色转 tRNS；调色板深度不按实际色数降到 1/2/4 位）；动图 GIF → APNG（见上文） |
 | ICO | 取最大分辨率条目，内嵌 BMP/PNG 按原色型位深输出；AND 掩码携带透明时，24/32 位条目升为 RGBA，调色板条目转 tRNS |
 | QOI | 8 位 RGB / RGBA |
 | WebP | 8 位 RGB / RGBA（有损与无损） |
 | TIFF | 连续存储的图按位深匹配：灰度 1/2/4/8/16、调色板 1/2/4/8、RGB/RGBA 8/16；其余变体（CMYK、YCbCr、分块、分离平面、浮点）回退 RGBA 接口输出 8 位 RGBA |
-| HEIF / AVIF | 8 位源 → 8 位 RGBA；10/12 位源 → 16 位 RGBA |
+| HEIF / AVIF | 8 位源 → 8 位 RGBA；10/12 位源 → 16 位 RGBA（数值放大到 16 位，非位深移位） |
 
 `--auto` 优化模式（默认关闭）会额外去掉完全无用的 alpha 通道、把纯灰度 RGB 降为 GRAY。
 
