@@ -2,6 +2,7 @@
 #include "image.h"
 #include "dec/decode.h"
 #include "enc/pngenc.h"
+#include "enc/apngenc.h"
 #include "util/filetime.h"
 #include <stdio.h>
 #include <stdlib.h>

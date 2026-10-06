@@ -15,6 +15,7 @@ set(_dav1d_sigaction 0)
 set(_dav1d_pthread_np 0)
 set(_dav1d_dlsym 0)
 set(_dav1d_getauxval 0)
+set(_dav1d_elf_aux 0)
 set(_dav1d_io_h 0)
 set(_dav1d_unistd_h 1)
 if(WIN32)
@@ -23,7 +24,13 @@ if(WIN32)
 elseif(UNIX)
     set(_dav1d_sigaction 1)
     set(_dav1d_dlsym 1)
-    set(_dav1d_getauxval 1)
+    # getauxval/elf_aux_info only exist on Linux (and BSD); macOS has no
+    # sys/auxv.h and meson only probes these on ARM-family arches anyway
+    if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+       CMAKE_SYSTEM_PROCESSOR MATCHES "(aarch64)|(arm)|(loongarch)|(ppc)|(riscv)")
+        set(_dav1d_getauxval 1)
+        set(_dav1d_elf_aux 1)
+    endif()
 endif()
 
 file(WRITE "${DAV1D_BIN_DIR}/config.h" "\
@@ -48,7 +55,7 @@ file(WRITE "${DAV1D_BIN_DIR}/config.h" "\
 #define HAVE_POSIX_MEMALIGN 1
 #define HAVE_CLOCK_GETTIME 1
 #define HAVE_DLSYM ${_dav1d_dlsym}
-#define HAVE_ELF_AUX_INFO ${_dav1d_sigaction}
+#define HAVE_ELF_AUX_INFO ${_dav1d_elf_aux}
 #define HAVE_GETAUXVAL ${_dav1d_getauxval}
 #define HAVE_SIGACTION ${_dav1d_sigaction}
 #define HAVE_PTHREAD_NP_H ${_dav1d_pthread_np}
@@ -140,5 +147,4 @@ if(NOT WIN32)
     find_package(Threads REQUIRED)
     target_link_libraries(dav1d PUBLIC Threads::Threads)
 endif()
-# libavif's AVIF_CODEC_DAV1D=SYSTEM path checks for this target
-add_library(dav1d::dav1d ALIAS dav1d)
+

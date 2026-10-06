@@ -220,6 +220,16 @@ file(COPY "${CMAKE_BINARY_DIR}/libde265-build/libde265/de265-version.h"
 set(LIBDE265_INCLUDE_DIR "${LIBDE265_MERGED_INCLUDE}")
 
 add_subdirectory(thirdparty/dav1d dav1d-build)
+# preset what libavif's Finddav1d would find (its SYSTEM mode creates a
+# dav1d::dav1d IMPORTED target from these; an ALIAS cannot be used because
+# libavif runs target_link_libraries on the target itself)
+if(MSVC)
+    set(DAV1D_LIBRARY "${CMAKE_BINARY_DIR}/dav1d-build/dav1d.lib")
+else()
+    set(DAV1D_LIBRARY "${CMAKE_BINARY_DIR}/dav1d-build/libdav1d.a")
+endif()
+set(DAV1D_INCLUDE_DIR
+    "${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/dav1d/include")
 # libavif SYSTEM codec mode picks up the existing dav1d target
 set(AVIF_CODEC_DAV1D "SYSTEM" CACHE STRING "" FORCE)
 set(AVIF_BUILD_APPS OFF CACHE BOOL "" FORCE)
