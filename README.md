@@ -159,8 +159,23 @@ lossless verification, all filter modes, compression levels, timestamp preservat
 | libpng | 1.6.59 | PNG License (zlib-style) | [SourceForge libpng16/1.6.59](https://sourceforge.net/projects/libpng/files/libpng16/1.6.59/) (vendored in `thirdparty/libpng`) |
 | zlib | 1.3.1 | zlib License | [madler/zlib](https://github.com/madler/zlib) (vendored in `thirdparty/zlib`) |
 | libjpeg-turbo | 3.2.0 | IJG / BSD-3-Clause / zlib | [GitHub Releases](https://github.com/libjpeg-turbo/libjpeg-turbo/releases/latest) (vendored in `thirdparty/libjpeg-turbo`, with a local patch — see its VENDORED.md) |
+| giflib | 6.1.3 | MIT | [SourceForge giflib](https://sourceforge.net/projects/giflib/) (vendored in `thirdparty/giflib`, decode side + encoder used by the self-test) |
+| libwebp | 1.6.0 | BSD-3-Clause | [GitHub Releases](https://github.com/webmproject/libwebp/releases) (vendored in `thirdparty/libwebp`) |
+| libtiff | 4.7.2 | libtiff License (MIT-style) | [download.osgeo.org/libtiff](https://download.osgeo.org/libtiff/) (vendored in `thirdparty/tiff`) |
+| libde265 | 1.1.3 | **LGPL-3.0** | [strukturag/libde265](https://github.com/strukturag/libde265) (vendored in `thirdparty/libde265`) |
+| libheif | 1.23.5 | **LGPL-3.0** | [strukturag/libheif](https://github.com/strukturag/libheif) (vendored in `thirdparty/libheif`) |
+| libavif | 1.4.2 | BSD-2-Clause | [AOMediaCodec/libavif](https://github.com/AOMediaCodec/libavif) (vendored in `thirdparty/libavif`) |
+| dav1d | 1.5.4 | BSD-2-Clause | [code.videolan.org/videolan/dav1d](https://code.videolan.org/videolan/dav1d) (vendored in `thirdparty/dav1d`, hand-written CMake integration) |
+| libpng APNG patch | for 1.6.59 | same as libpng | [APNG patch](https://sourceforge.net/projects/apng/files/libpng-apng/) (applied to `thirdparty/libpng`, powers GIF → APNG output) |
 | Qt 6 (optional, GUI only) | 6.x | LGPL-3.0 / GPL | [qt.io](https://www.qt.io/) |
 
-All vendored libraries are trimmed copies (docs, test assets and other architectures'
-SIMD code removed) that retain their original license files; see each directory
-(libpng: LICENSE / LICENSES, zlib: LICENSE, libjpeg-turbo: LICENSE.md).
+All vendored libraries are trimmed copies (docs, test assets, other architectures'
+SIMD/asm code removed) that retain their original license files; see each directory
+(libpng: LICENSE / LICENSES, zlib: LICENSE, libjpeg-turbo: LICENSE.md,
+giflib: COPYING, libwebp: COPYING, tiff: LICENSE.md, libde265 / libheif: COPYING,
+libavif: LICENSE, dav1d: COPYING).
+
+**LGPL-3.0 note** (libde265 / libheif): vendoring the sources and statically linking
+them is permitted; if you distribute modified binaries of this tool, follow the LGPL
+obligations for the library parts (provide the library source or a relinkable
+object-file form).

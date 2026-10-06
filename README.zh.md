@@ -153,8 +153,21 @@ img2png -l 6 -f paeth --auto a.ppm     # 自定义级别/滤镜/自动优化
 | libpng | 1.6.59 | PNG License (zlib-style) | [SourceForge libpng16/1.6.59](https://sourceforge.net/projects/libpng/files/libpng16/1.6.59/)（内置于 `thirdparty/libpng`） |
 | zlib | 1.3.1 | zlib License | [madler/zlib](https://github.com/madler/zlib)（内置于 `thirdparty/zlib`） |
 | libjpeg-turbo | 3.2.0 | IJG / BSD-3-Clause / zlib 混合 | [GitHub Releases](https://github.com/libjpeg-turbo/libjpeg-turbo/releases/latest)（内置于 `thirdparty/libjpeg-turbo`，含本地补丁，见其 VENDORED.md） |
+| giflib | 6.1.3 | MIT | [SourceForge giflib](https://sourceforge.net/projects/giflib/)（内置于 `thirdparty/giflib`，仅解码侧 + 编码器用于自测试） |
+| libwebp | 1.6.0 | BSD-3-Clause | [GitHub Releases](https://github.com/webmproject/libwebp/releases)（内置于 `thirdparty/libwebp`） |
+| libtiff | 4.7.2 | libtiff License（MIT 风格） | [download.osgeo.org/libtiff](https://download.osgeo.org/libtiff/)（内置于 `thirdparty/tiff`） |
+| libde265 | 1.1.3 | **LGPL-3.0** | [strukturag/libde265](https://github.com/strukturag/libde265)（内置于 `thirdparty/libde265`） |
+| libheif | 1.23.5 | **LGPL-3.0** | [strukturag/libheif](https://github.com/strukturag/libheif)（内置于 `thirdparty/libheif`） |
+| libavif | 1.4.2 | BSD-2-Clause | [AOMediaCodec/libavif](https://github.com/AOMediaCodec/libavif)（内置于 `thirdparty/libavif`） |
+| dav1d | 1.5.4 | BSD-2-Clause | [code.videolan.org/videolan/dav1d](https://code.videolan.org/videolan/dav1d)（内置于 `thirdparty/dav1d`，手写 CMake 集成，见 VENDORED 计划） |
+| libpng APNG 补丁 | 针对 1.6.59 | 随 libpng 许可 | [apng 补丁](https://sourceforge.net/projects/apng/files/libpng-apng/)（已应用于 `thirdparty/libpng`，提供 GIF→APNG 动图输出） |
 | Qt 6（可选，仅 GUI） | 6.x | LGPL-3.0 / GPL | [qt.io](https://www.qt.io/) |
 
-三个内置库均为裁剪副本（去掉了与构建无关的文档/测试资源/其他架构 SIMD），保留原许可
-文件；完整许可文本见各目录（libpng: LICENSE / LICENSES，zlib: LICENSE，
-libjpeg-turbo: LICENSE.md）。
+所有内置库均为裁剪副本（去掉了与构建无关的文档/测试资源/其他架构 SIMD/汇编），
+保留原许可文件；完整许可文本见各目录（libpng: LICENSE / LICENSES，zlib: LICENSE，
+libjpeg-turbo: LICENSE.md，giflib: COPYING，libwebp: COPYING，tiff: LICENSE.md，
+libde265 / libheif: COPYING，libavif: LICENSE，dav1d: COPYING）。
+
+**LGPL-3.0 说明**（libde265 / libheif）：以源码形式随仓库分发、静态链接均符合 LGPL；
+若你以二进制形式分发本工具的修改版，请遵循 LGPL 的对应义务（提供库部分源码或
+目标文件重链接途径）。
