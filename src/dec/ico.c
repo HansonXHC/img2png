@@ -67,9 +67,19 @@ static int ico_bmp_decode(const uint8_t *buf, size_t size, int entry_w, int entr
     const uint8_t *xor_data = buf + pos;
     const uint8_t *and_data = buf + pos + xor_row * h;
 
+    /* Does the 1-bit AND mask carry any transparency?  Legacy icons express
+     * transparency this way instead of with an alpha channel. */
+    int mask_any = 0;
+    for (size_t i = 0; i < and_row * (size_t)h && !mask_any; i++)
+        if (and_data[i])
+            mask_any = 1;
+
     memset(img, 0, sizeof(*img));
     img->width = (int)width;
     img->height = h;
+
+    /* set when the AND mask supplies the alpha for a 24/32-bit entry */
+    int alpha_from_mask = 0;
 
     if (bpp <= 8) {
         img->color = IMG_PALETTE;
@@ -79,15 +89,17 @@ static int ico_bmp_decode(const uint8_t *buf, size_t size, int entry_w, int entr
         for (int i = 0; i < 256; i++)
             img->pal_alpha[i] = 255;
     } else if (bpp == 24) {
-        img->color = IMG_RGB;
+        img->color = mask_any ? IMG_RGBA : IMG_RGB;
+        alpha_from_mask = mask_any;
         img->bit_depth = 8;
     } else {
         /* 32-bit: if every alpha byte is 0 the file is opaque despite the
-         * 4th channel (common in legacy icons) */
+         * 4th channel (common in legacy icons), so use the AND mask instead */
         int any_alpha = 0;
         for (size_t i = 0; i < xor_row * (size_t)h; i += 4)
             if (xor_data[i + 3]) { any_alpha = 1; break; }
-        img->color = any_alpha ? IMG_RGBA : IMG_RGB;
+        alpha_from_mask = !any_alpha && mask_any;
+        img->color = (any_alpha || mask_any) ? IMG_RGBA : IMG_RGB;
         img->bit_depth = 8;
     }
 
@@ -107,30 +119,19 @@ static int ico_bmp_decode(const uint8_t *buf, size_t size, int entry_w, int entr
 
         switch (img->color) {
         case IMG_PALETTE:
-            if (bpp == 8) {
-                for (x = 0; x < width; x++) {
-                    int idx = srow[x];
-                    if (idx >= npal)
-                        idx = 0;
-                    d[x] = (uint8_t)idx;
-                }
-            } else {
-                for (x = 0; x < width; x++) {
-                    int bitpos = x * (int)bpp;
-                    int byte = srow[bitpos >> 3];
-                    int shift = 8 - (bitpos & 7) - (int)bpp;
-                    unsigned idx = (byte >> shift) & ((1u << bpp) - 1u);
-                    d[x] = (uint8_t)(idx < (unsigned)npal ? idx : 0);
-                }
-            }
-            /* AND mask: bit set = transparent -> zero that entry's alpha */
             for (x = 0; x < width; x++) {
+                unsigned idx = (bpp == 8) ? srow[x]
+                                          : img_ld_bits(srow, x, (int)bpp);
+                if (idx >= (unsigned)npal)
+                    idx = 0;
+                if (bpp == 8)
+                    d[x] = (uint8_t)idx;
+                else
+                    img_st_bits(d, x, (int)bpp, idx);
+                /* AND mask: bit set = transparent -> zero that entry's alpha */
                 if (arow[x >> 3] & (0x80u >> (x & 7))) {
-                    int idx = (bpp == 8) ? d[x] : -1;
-                    if (idx >= 0) {
-                        img->pal_alpha[idx] = 0;
-                        mask_used = 1;
-                    }
+                    img->pal_alpha[idx] = 0;
+                    mask_used = 1;
                 }
             }
             break;
@@ -150,11 +151,22 @@ static int ico_bmp_decode(const uint8_t *buf, size_t size, int entry_w, int entr
             }
             break;
         case IMG_RGBA:
-            for (x = 0; x < width; x++) {
-                d[x * 4 + 0] = srow[x * 4 + 2];
-                d[x * 4 + 1] = srow[x * 4 + 1];
-                d[x * 4 + 2] = srow[x * 4 + 0];
-                d[x * 4 + 3] = srow[x * 4 + 3];
+            if (bpp == 24) {    /* promoted for AND-mask transparency */
+                for (x = 0; x < width; x++) {
+                    d[x * 4 + 0] = srow[x * 3 + 2];
+                    d[x * 4 + 1] = srow[x * 3 + 1];
+                    d[x * 4 + 2] = srow[x * 3 + 0];
+                    d[x * 4 + 3] = (arow[x >> 3] & (0x80u >> (x & 7))) ? 0 : 255;
+                }
+            } else {
+                for (x = 0; x < width; x++) {
+                    d[x * 4 + 0] = srow[x * 4 + 2];
+                    d[x * 4 + 1] = srow[x * 4 + 1];
+                    d[x * 4 + 2] = srow[x * 4 + 0];
+                    d[x * 4 + 3] = alpha_from_mask
+                        ? ((arow[x >> 3] & (0x80u >> (x & 7))) ? 0 : 255)
+                        : srow[x * 4 + 3];
+                }
             }
             break;
         default:

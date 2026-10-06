@@ -117,15 +117,11 @@ static int tiff_decode_matched(TIFF *tif, img_image_t *img,
             } else if (bits == 8) {
                 for (uint32_t x = 0; x < w; x++)
                     drow[x] = invert ? (uint8_t)(255 - sbuf[x]) : sbuf[x];
-            } else { /* 1/2/4-bit packed MSB-first */
+            } else { /* 1/2/4-bit packed MSB-first, same depth out */
                 for (uint32_t x = 0; x < w; x++) {
-                    int shift = 8 - (int)bits - (int)((x * bits) % 8);
-                    unsigned v = (sbuf[(x * bits) >> 3] >> shift) & maxval;
+                    unsigned v = img_ld_bits(sbuf, (int)x, (int)bits);
                     if (invert) v = maxval - v;
-                    size_t byte = x >> 3;
-                    int dshift = 7 - (int)(x & 7);
-                    if (v)
-                        drow[byte] |= (uint8_t)(1u << dshift);
+                    img_st_bits(drow, (int)x, (int)bits, v);
                 }
             }
         }
@@ -172,15 +168,10 @@ static int tiff_decode_matched(TIFF *tif, img_image_t *img,
             if (bits == 8) {
                 memcpy(drow, sbuf, w);
             } else {
-                for (uint32_t x = 0; x < w; x++) {
-                    int shift = 8 - (int)bits - (int)((x * bits) % 8);
-                    unsigned idx = (sbuf[(x * bits) >> 3] >> shift) &
-                                   ((1u << bits) - 1u);
-                    size_t byte = x >> 3;
-                    int dshift = 7 - (int)(x & 7);
-                    if (idx)
-                        drow[byte] |= (uint8_t)(1u << dshift);
-                }
+                /* 1/2/4-bit indices, same depth out (img->data is calloc'd) */
+                for (uint32_t x = 0; x < w; x++)
+                    img_st_bits(drow, (int)x, (int)bits,
+                                img_ld_bits(sbuf, (int)x, (int)bits));
             }
         }
         _TIFFfree(sbuf);

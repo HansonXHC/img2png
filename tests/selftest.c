@@ -285,6 +285,401 @@ static void expected_rgba(int w, int h, int alpha, uint8_t *out)
         }
 }
 
+/* ---------------------------------------------------------------------------
+ * Native-depth PNG reader: unlike read_png_rgba() this applies no transforms,
+ * so it reports the color type / bit depth actually stored in the file and
+ * hands back rows at their native packing.  Used to prove that bit-depth
+ * matching preserved the source depth instead of silently normalizing it.
+ * ------------------------------------------------------------------------ */
+typedef struct {
+    int width, height, bit_depth, color_type, channels;
+    size_t rowstride;
+    uint8_t *data;
+    int ncolors;
+    uint8_t palette[256 * 3];
+    int has_pal_trns;
+    uint8_t pal_alpha[256];
+    int gray_trns_valid;
+    unsigned gray_trns;
+} raw_png_t;
+
+static int read_png_native(const char *path, raw_png_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    FILE *f = img_fopen_read(path);
+    if (!f)
+        return -1;
+    png_err_t pe;
+    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, &pe, pngerr_error, pngerr_warn);
+    png_infop info = png ? png_create_info_struct(png) : NULL;
+    if (!png || !info) { if (f) fclose(f); return -1; }
+    if (setjmp(pe.jb)) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(f);
+        free(out->data);
+        out->data = NULL;
+        return -1;
+    }
+    png_init_io(png, f);
+    png_read_info(png, info);
+
+    out->width = (int)png_get_image_width(png, info);
+    out->height = (int)png_get_image_height(png, info);
+    out->bit_depth = png_get_bit_depth(png, info);
+    out->color_type = png_get_color_type(png, info);
+    out->channels = png_get_channels(png, info);
+
+    if (out->color_type == PNG_COLOR_TYPE_PALETTE) {
+        png_colorp plte = NULL;
+        int n = 0;
+        png_get_PLTE(png, info, &plte, &n);
+        out->ncolors = n;
+        for (int i = 0; i < n && i < 256; i++) {
+            out->palette[i * 3 + 0] = plte[i].red;
+            out->palette[i * 3 + 1] = plte[i].green;
+            out->palette[i * 3 + 2] = plte[i].blue;
+        }
+        for (int i = 0; i < 256; i++)
+            out->pal_alpha[i] = 255;
+        png_bytep trans = NULL;
+        int ntrans = 0;
+        if (png_get_tRNS(png, info, &trans, &ntrans, NULL) && ntrans > 0) {
+            out->has_pal_trns = 1;
+            for (int i = 0; i < ntrans && i < 256; i++)
+                out->pal_alpha[i] = trans[i];
+        }
+    } else {
+        png_color_16p tc = NULL;
+        int ntrans = 0;
+        if (png_get_tRNS(png, info, NULL, &ntrans, &tc) && ntrans > 0 && tc) {
+            out->gray_trns_valid = 1;
+            out->gray_trns = tc->gray;
+        }
+    }
+
+    out->rowstride = png_get_rowbytes(png, info);
+    out->data = (uint8_t *)malloc(out->rowstride * (size_t)out->height);
+    png_bytep *rows = (png_bytep *)malloc(sizeof(png_bytep) * (size_t)out->height);
+    if (!out->data || !rows) {
+        free(rows);
+        free(out->data);
+        out->data = NULL;
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(f);
+        return -1;
+    }
+    for (int y = 0; y < out->height; y++)
+        rows[y] = out->data + (size_t)y * out->rowstride;
+    png_read_image(png, rows);
+    png_read_end(png, NULL);
+    free(rows);
+    png_destroy_read_struct(&png, &info, NULL);
+    fclose(f);
+    return 0;
+}
+
+static void raw_png_free(raw_png_t *p)
+{
+    free(p->data);
+    p->data = NULL;
+}
+
+/* one sample read at the file's native packing (channel 0 for sub-byte) */
+static unsigned raw_sample(const raw_png_t *p, int x, int y, int ch)
+{
+    const uint8_t *row = p->data + (size_t)y * p->rowstride;
+    if (p->bit_depth == 16)
+        return img_ld16be(row + ((size_t)x * (size_t)p->channels + (size_t)ch) * 2);
+    if (p->bit_depth == 8)
+        return row[(size_t)x * (size_t)p->channels + (size_t)ch];
+    return img_ld_bits(row, x, p->bit_depth);
+}
+
+/* pack `n` sample values MSB-first at `bits` per sample into dst (zeroed) */
+static void pack_samples(uint8_t *dst, const uint8_t *vals, int n, int bits)
+{
+    memset(dst, 0, (size_t)(((size_t)n * (size_t)bits + 7) / 8));
+    for (int i = 0; i < n; i++)
+        img_st_bits(dst, i, bits, vals[i]);
+}
+
+/* store / load one sample in an img_image_t at its native packing */
+static void put_sample(img_image_t *im, int x, int y, int c, unsigned v)
+{
+    uint8_t *row = im->data + (size_t)y * im->rowstride;
+    int ch = img_channels(im->color);
+    if (im->bit_depth == 16)
+        img_st16be(row + ((size_t)x * (size_t)ch + (size_t)c) * 2, v);
+    else if (im->bit_depth == 8)
+        row[(size_t)x * (size_t)ch + (size_t)c] = (uint8_t)v;
+    else
+        img_st_bits(row, x, im->bit_depth, v);
+}
+
+static unsigned get_sample(const img_image_t *im, int x, int y, int c)
+{
+    const uint8_t *row = im->data + (size_t)y * im->rowstride;
+    int ch = img_channels(im->color);
+    if (im->bit_depth == 16)
+        return img_ld16be(row + ((size_t)x * (size_t)ch + (size_t)c) * 2);
+    if (im->bit_depth == 8)
+        return row[(size_t)x * (size_t)ch + (size_t)c];
+    return img_ld_bits(row, x, im->bit_depth);
+}
+
+/* largest sample value representable at a depth */
+static unsigned depth_max(int bits) { return bits == 16 ? 65535u : ((1u << bits) - 1u); }
+
+/* --- generators for the bit-depth regression tests --- */
+
+/* BMP with a 1/4-bit palette; index at (x,y) is (x + y) % npal */
+static int bmp_sub_index(int x, int y, int npal) { return (x + y) % npal; }
+
+static int gen_bmp_subbyte(const char *path, int w, int h, int bpp, int npal)
+{
+    long row = ((long)w * bpp + 31) / 32 * 4;
+    long pix = row * h;
+    long palbytes = (long)npal * 4;
+    uint8_t *px = (uint8_t *)calloc(1, (size_t)pix);
+    uint8_t hdr[54];
+    memset(hdr, 0, sizeof(hdr));
+    hdr[0] = 'B'; hdr[1] = 'M';
+    uint32_t fsz = (uint32_t)(54 + palbytes + pix);
+    hdr[2] = (uint8_t)fsz; hdr[3] = fsz >> 8; hdr[4] = fsz >> 16; hdr[5] = fsz >> 24;
+    uint32_t off = (uint32_t)(54 + palbytes);
+    memcpy(hdr + 10, &off, 4);
+    uint32_t hsz = 40; memcpy(hdr + 14, &hsz, 4);
+    int32_t w32 = w, h32 = h; memcpy(hdr + 18, &w32, 4); memcpy(hdr + 22, &h32, 4);
+    uint16_t planes = 1, b16 = (uint16_t)bpp;
+    memcpy(hdr + 26, &planes, 2); memcpy(hdr + 28, &b16, 2);
+    uint32_t clrused = (uint32_t)npal; memcpy(hdr + 46, &clrused, 4);
+
+    for (int y = 0; y < h; y++)
+        for (int x = 0; x < w; x++)
+            img_st_bits(px + (size_t)(h - 1 - y) * row, x, bpp,
+                        (unsigned)bmp_sub_index(x, y, npal));
+
+    FILE *f = img_fopen_write(path);
+    int ok = 0;
+    if (f) {
+        uint8_t pal[256 * 4];
+        for (int i = 0; i < npal; i++) {
+            pal[i * 4 + 0] = (uint8_t)(i * 5);      /* B */
+            pal[i * 4 + 1] = (uint8_t)(i * 3);      /* G */
+            pal[i * 4 + 2] = (uint8_t)(i * 7);      /* R */
+            pal[i * 4 + 3] = 0;
+        }
+        ok = fwrite(hdr, 1, 54, f) == 54 &&
+             fwrite(pal, 1, (size_t)palbytes, f) == (size_t)palbytes &&
+             fwrite(px, 1, (size_t)pix, f) == (size_t)pix;
+        fclose(f);
+    }
+    free(px);
+    return ok ? 0 : -1;
+}
+
+/* palette entries used by the ICO generator */
+static uint8_t ico_pal_r(int i) { return (uint8_t)(i * 7); }
+static uint8_t ico_pal_g(int i) { return (uint8_t)(i * 3); }
+static uint8_t ico_pal_b(int i) { return (uint8_t)(i * 5); }
+
+/* Build a one-entry .ico holding a DIB.  bpp: 1/4/8/24/32.  `with_mask` writes
+ * the 1-bit AND mask (left half transparent); `real_alpha` gives 32-bit
+ * entries a genuine alpha channel (same left-half pattern). */
+static int gen_ico_dib(const char *path, int w, int h, int bpp,
+                       int with_mask, int real_alpha)
+{
+    int npal = (bpp <= 8) ? (1 << bpp) : 0;
+    long palbytes = (long)npal * 4;
+    long xor_row = ((long)w * bpp + 31) / 32 * 4;
+    long and_row = ((long)w + 31) / 32 * 4;
+    long dib = 40 + palbytes + xor_row * h + and_row * h;
+    long total = 22 + dib;
+
+    uint8_t *buf = (uint8_t *)calloc(1, (size_t)total);
+    uint8_t *p = buf + 22;
+    uint16_t one = 1, cnt = 1, b16 = (uint16_t)bpp;
+    memcpy(buf + 2, &one, 2);                       /* ICONDIR.idType   */
+    memcpy(buf + 4, &cnt, 2);                       /* ICONDIR.idCount  */
+    buf[6] = (uint8_t)w;                            /* entry bWidth     */
+    buf[7] = (uint8_t)h;                            /* entry bHeight    */
+    memcpy(buf + 10, &one, 2);                      /* wPlanes          */
+    memcpy(buf + 12, &b16, 2);                      /* wBitCount        */
+    uint32_t dsz = (uint32_t)dib; memcpy(buf + 14, &dsz, 4);
+    uint32_t off = 22; memcpy(buf + 18, &off, 4);
+
+    uint32_t hsz = 40; memcpy(p + 0, &hsz, 4);
+    int32_t w32 = w, h2 = h * 2;
+    memcpy(p + 4, &w32, 4); memcpy(p + 8, &h2, 4);
+    memcpy(p + 12, &one, 2);                        /* biPlanes         */
+    memcpy(p + 14, &b16, 2);                        /* biBitCount       */
+    uint32_t clrused = (uint32_t)npal; memcpy(p + 32, &clrused, 4);
+
+    uint8_t *pal = p + 40;
+    for (int i = 0; i < npal; i++) {
+        pal[i * 4 + 0] = ico_pal_b(i);
+        pal[i * 4 + 1] = ico_pal_g(i);
+        pal[i * 4 + 2] = ico_pal_r(i);
+        pal[i * 4 + 3] = 0;
+    }
+    uint8_t *xor = pal + palbytes;
+    uint8_t *andm = xor + xor_row * h;
+
+    for (int y = 0; y < h; y++) {
+        uint8_t *xr = xor + (size_t)y * xor_row;    /* DIB rows are bottom-up */
+        int ly = h - 1 - y;
+        for (int x = 0; x < w; x++) {
+            if (bpp <= 8) {
+                img_st_bits(xr, x, bpp,
+                            (unsigned)((x + ly) % (npal > 0 ? npal : 1)));
+            } else {
+                int step = bpp / 8;
+                xr[x * step + 0] = (uint8_t)(x * 3 + ly);   /* B */
+                xr[x * step + 1] = (uint8_t)(x + ly);       /* G */
+                xr[x * step + 2] = (uint8_t)(x * 7 + ly);   /* R */
+                if (bpp == 32)
+                    xr[x * 4 + 3] = real_alpha
+                        ? (uint8_t)((x < w / 2) ? 0 : 255)
+                        : 0;
+            }
+        }
+        if (with_mask) {
+            uint8_t *ar = andm + (size_t)y * and_row;
+            for (int x = 0; x < w / 2; x++)
+                ar[x >> 3] |= (uint8_t)(0x80u >> (x & 7));
+        }
+    }
+
+    FILE *f = img_fopen_write(path);
+    int ok = f && fwrite(buf, 1, (size_t)total, f) == (size_t)total;
+    if (f) fclose(f);
+    free(buf);
+    return ok ? 0 : -1;
+}
+
+/* Build a one-entry .ico whose entry payload is a PNG file (the PNG-in-ICO
+ * container form), exercising png_decode_mem through the ICO decoder. */
+static int gen_ico_png(const char *path, const char *png_path)
+{
+    FILE *pf = img_fopen_read(png_path);
+    if (!pf)
+        return -1;
+    fseek(pf, 0, SEEK_END);
+    long n = ftell(pf);
+    rewind(pf);
+    uint8_t *blob = (uint8_t *)malloc((size_t)n);
+    if (!blob || fread(blob, 1, (size_t)n, pf) != (size_t)n) {
+        if (pf) fclose(pf);
+        free(blob);
+        return -1;
+    }
+    fclose(pf);
+
+    uint8_t hdr[22];
+    memset(hdr, 0, sizeof(hdr));
+    uint16_t one = 1, cnt = 1;
+    memcpy(hdr + 2, &one, 2);
+    memcpy(hdr + 4, &cnt, 2);
+    hdr[6] = 0;                                     /* 0 = 256 */
+    hdr[7] = 0;
+    memcpy(hdr + 10, &one, 2);
+    uint16_t b16 = 32; memcpy(hdr + 12, &b16, 2);
+    uint32_t sz = (uint32_t)n; memcpy(hdr + 14, &sz, 4);
+    uint32_t off = 22; memcpy(hdr + 18, &off, 4);
+
+    FILE *f = img_fopen_write(path);
+    int ok = f && fwrite(hdr, 1, 22, f) == 22 &&
+             fwrite(blob, 1, (size_t)n, f) == (size_t)n;
+    if (f) fclose(f);
+    free(blob);
+    return ok ? 0 : -1;
+}
+
+/* Sub-byte grayscale TIFF (1/2/4 bits) written through libtiff */
+static int tiff_write_subbyte_gray(const char *path, int w, int h, int bits,
+                                   const uint8_t *vals, int photometric)
+{
+    TIFF *tf = TIFFOpen(path, "w");
+    if (!tf)
+        return -1;
+    TIFFSetField(tf, TIFFTAG_IMAGEWIDTH, (uint32_t)w);
+    TIFFSetField(tf, TIFFTAG_IMAGELENGTH, (uint32_t)h);
+    TIFFSetField(tf, TIFFTAG_BITSPERSAMPLE, (uint16_t)bits);
+    TIFFSetField(tf, TIFFTAG_SAMPLESPERPIXEL, 1);
+    TIFFSetField(tf, TIFFTAG_PHOTOMETRIC, (uint16_t)photometric);
+    TIFFSetField(tf, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+    uint8_t row[256];
+    int rc = 0;
+    for (int y = 0; y < h; y++) {
+        pack_samples(row, vals + (size_t)y * w, w, bits);
+        if (TIFFWriteScanline(tf, row, (uint32_t)y, 0) < 0) { rc = -1; break; }
+    }
+    TIFFClose(tf);
+    return rc;
+}
+
+/* Sub-byte palette TIFF (1/2/4 bits).  Entry i decodes to 8-bit R=17i,
+ * G=255-17i, B=17i. */
+static int tiff_write_subbyte_palette(const char *path, int w, int h, int bits,
+                                      const uint8_t *vals)
+{
+    int nc = 1 << bits;
+    uint16_t rmap[16], gmap[16], bmap[16];
+    for (int i = 0; i < nc; i++) {
+        rmap[i] = (uint16_t)(i * 65535 / (nc - 1));
+        gmap[i] = (uint16_t)(65535 - i * 65535 / (nc - 1));
+        bmap[i] = (uint16_t)(i * 65535 / (nc - 1));
+    }
+    TIFF *tf = TIFFOpen(path, "w");
+    if (!tf)
+        return -1;
+    TIFFSetField(tf, TIFFTAG_IMAGEWIDTH, (uint32_t)w);
+    TIFFSetField(tf, TIFFTAG_IMAGELENGTH, (uint32_t)h);
+    TIFFSetField(tf, TIFFTAG_BITSPERSAMPLE, (uint16_t)bits);
+    TIFFSetField(tf, TIFFTAG_SAMPLESPERPIXEL, 1);
+    TIFFSetField(tf, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_PALETTE);
+    TIFFSetField(tf, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+    TIFFSetField(tf, TIFFTAG_COLORMAP, rmap, gmap, bmap);
+    uint8_t row[256];
+    int rc = 0;
+    for (int y = 0; y < h; y++) {
+        pack_samples(row, vals + (size_t)y * w, w, bits);
+        if (TIFFWriteScanline(tf, row, (uint32_t)y, 0) < 0) { rc = -1; break; }
+    }
+    TIFFClose(tf);
+    return rc;
+}
+
+/* PBM (ASCII "P1" / binary "P4"): sample written is 1 for black */
+static int gen_pbm(const char *path, int w, int h, int ascii)
+{
+    FILE *f = img_fopen_write(path);
+    if (!f)
+        return -1;
+    int ok = fprintf(f, ascii ? "P1\n%d %d\n" : "P4\n%d %d\n", w, h) > 0;
+    for (int y = 0; y < h && ok; y++) {
+        for (int x = 0; x < w && ok; x++) {
+            int black = ((x + y) & 1);
+            if (ascii)
+                ok = fprintf(f, "%d ", black) > 0;
+        }
+        if (!ascii && ok) {
+            /* binary rows are packed 1 bit per pixel, (w+7)/8 bytes each */
+            uint8_t row[512];
+            int row_bytes = (w + 7) / 8;
+            memset(row, 0, sizeof(row));
+            for (int x = 0; x < w; x++)
+                if ((x + y) & 1)
+                    img_st_bits(row, x, 1, 1);
+            ok = fwrite(row, 1, (size_t)row_bytes, f) == (size_t)row_bytes;
+        }
+    }
+    if (ascii && ok)
+        ok = fputc('\n', f) != EOF;
+    fclose(f);
+    return ok ? 0 : -1;
+}
+
 static int compare_rgba(const uint8_t *a, const uint8_t *b, int n)
 {
     for (int i = 0; i < n; i++)
@@ -1124,6 +1519,546 @@ pgm_done:;
         CHECK(rc != 0, "heif rejects garbage");
         CHECK(err[0] != 0, "error message present");
         if (f) fclose(f);
+    }
+
+    /* --- BMP sub-byte palettes (1/4-bit): these used to be written one byte
+     *     per pixel into a bit-packed row, corrupting the image and writing
+     *     past the row stride --- */
+    printf("BMP sub-byte palette (1/4-bit):\n");
+    {
+        static const int bpps[2] = {1, 4};
+        static const int ncols[2] = {2, 16};
+        for (int k = 0; k < 2; k++) {
+            int bpp = bpps[k], npal = ncols[k];
+            char in[64], out[64];
+            snprintf(in, sizeof(in), "testout/sb%d.bmp", bpp);
+            snprintf(out, sizeof(out), "testout/sb%d.png", bpp);
+            CHECK(gen_bmp_subbyte(in, W, H, bpp, npal) == 0, "generate bmp sub-byte");
+            FILE *f = img_fopen_read(in);
+            img_image_t img;
+            int okd = f && bmp_decode(f, &img, err, sizeof(err)) == 0;
+            if (f) fclose(f);
+            CHECK(okd, "decode bmp sub-byte");
+            if (!okd) continue;
+            CHECK(img.color == IMG_PALETTE && img.bit_depth == bpp,
+                  "palette at source depth");
+            int idx_ok = 1;
+            for (int y = 0; y < H && idx_ok; y++)
+                for (int x = 0; x < W && idx_ok; x++)
+                    if ((int)get_sample(&img, x, y, 0) != bmp_sub_index(x, y, npal))
+                        idx_ok = 0;
+            CHECK(idx_ok, "indices identical (packed at source depth)");
+            CHECK(png_write_file(&img, &opts, out, err, sizeof(err)) == 0, "encode png");
+            img_free(&img);
+
+            raw_png_t rp;
+            int okr = read_png_native(out, &rp) == 0;
+            CHECK(okr, "png readable");
+            if (okr) {
+                CHECK(rp.bit_depth == bpp && rp.color_type == PNG_COLOR_TYPE_PALETTE,
+                      "png keeps palette depth");
+                int px_ok = 1;
+                for (int y = 0; y < H && px_ok; y++)
+                    for (int x = 0; x < W && px_ok; x++)
+                        if ((int)raw_sample(&rp, x, y, 0) != bmp_sub_index(x, y, npal))
+                            px_ok = 0;
+                CHECK(px_ok, "png indices identical");
+                raw_png_free(&rp);
+            }
+        }
+    }
+
+    /* --- ICO entries: every depth plus AND-mask transparency --- */
+    printf("ICO entries (1/4/8/24/32-bit + AND mask):\n");
+    {
+        static const struct { int bpp, mask, alpha; const char *name; } cases[] = {
+            {1,  1, 0, "1-bit palette + AND mask"},
+            {4,  1, 0, "4-bit palette + AND mask"},
+            {8,  0, 0, "8-bit palette opaque"},
+            {24, 1, 0, "24-bit + AND mask (promotes to RGBA)"},
+            {24, 0, 0, "24-bit opaque"},
+            {32, 0, 1, "32-bit real alpha channel"},
+            {32, 1, 0, "32-bit zero alpha + AND mask"},
+            {32, 0, 0, "32-bit opaque"},
+        };
+        const int w = 32, h = 16;
+        for (size_t c = 0; c < sizeof(cases) / sizeof(cases[0]); c++) {
+            printf("  [%s]\n", cases[c].name);
+            char in[64];
+            snprintf(in, sizeof(in), "testout/ic_%d_%d_%d.ico",
+                     cases[c].bpp, cases[c].mask, cases[c].alpha);
+            CHECK(gen_ico_dib(in, w, h, cases[c].bpp, cases[c].mask,
+                              cases[c].alpha) == 0, "generate ico");
+            FILE *f = img_fopen_read(in);
+            img_image_t img;
+            int okd = f && ico_decode(f, &img, err, sizeof(err)) == 0;
+            if (f) fclose(f);
+            CHECK(okd, "decode ico");
+            if (!okd) continue;
+
+            if (cases[c].bpp <= 8) {
+                int npal = 1 << cases[c].bpp;
+                CHECK(img.color == IMG_PALETTE && img.bit_depth == cases[c].bpp,
+                      "palette at entry depth");
+                int idx_ok = 1;
+                for (int y = 0; y < h && idx_ok; y++)
+                    for (int x = 0; x < w && idx_ok; x++)
+                        if ((int)get_sample(&img, x, y, 0) != (x + y) % npal)
+                            idx_ok = 0;
+                CHECK(idx_ok, "indices identical");
+                if (cases[c].mask) {
+                    int mask_ok = img.has_pal_alpha;
+                    for (int y = 0; y < h && mask_ok; y++)
+                        for (int x = 0; x < w / 2; x++)
+                            if (img.pal_alpha[(x + y) % npal] != 0) { mask_ok = 0; break; }
+                    CHECK(mask_ok, "AND mask clears those palette entries");
+                }
+            } else {
+                int want_rgba = (cases[c].bpp == 32) ? (cases[c].alpha || cases[c].mask)
+                                                     : cases[c].mask;
+                CHECK(img.color == (want_rgba ? IMG_RGBA : IMG_RGB) && img.bit_depth == 8,
+                      want_rgba ? "decodes as RGBA8" : "decodes as RGB8");
+                int ch = img_channels(img.color);
+                int px_ok = 1;
+                for (int y = 0; y < h && px_ok; y++)
+                    for (int x = 0; x < w && px_ok; x++) {
+                        const uint8_t *d = img.data + (size_t)y * img.rowstride +
+                                           (size_t)x * (size_t)ch;
+                        if (d[0] != (uint8_t)(x * 7 + y) || d[1] != (uint8_t)(x + y) ||
+                            d[2] != (uint8_t)(x * 3 + y))
+                            px_ok = 0;
+                    }
+                CHECK(px_ok, "RGB samples identical");
+                if (want_rgba) {
+                    int a_ok = 1;
+                    for (int y = 0; y < h && a_ok; y++)
+                        for (int x = 0; x < w; x++) {
+                            uint8_t a = img.data[(size_t)y * img.rowstride +
+                                                 (size_t)x * 4 + 3];
+                            uint8_t want = (x < w / 2) ? 0 : 255;
+                            if (a != want) { a_ok = 0; break; }
+                        }
+                    CHECK(a_ok, "alpha correct (left half transparent)");
+                }
+            }
+            img_free(&img);
+        }
+    }
+
+    /* --- ICO whose entry payload is a PNG file (png_decode_mem path) --- */
+    printf("ICO with PNG-compressed entry:\n");
+    {
+        img_image_t src;
+        memset(&src, 0, sizeof(src));
+        src.width = 16; src.height = 12; src.bit_depth = 8; src.color = IMG_RGBA;
+        src.rowstride = img_rowstride(src.width, 8, 4);
+        src.data = (uint8_t *)malloc(src.rowstride * (size_t)src.height);
+        for (int y = 0; y < src.height; y++)
+            for (int x = 0; x < src.width; x++) {
+                uint8_t *d = src.data + (size_t)y * src.rowstride + (size_t)x * 4;
+                d[0] = (uint8_t)(x * 7);
+                d[1] = (uint8_t)(y * 5);
+                d[2] = (uint8_t)((x ^ y) & 0xFF);
+                d[3] = (uint8_t)(x < 8 ? 0 : 255);
+            }
+        CHECK(png_write_file(&src, &opts, "testout/ico_payload.png", err, sizeof(err)) == 0,
+              "write png payload");
+        img_free(&src);
+        CHECK(gen_ico_png("testout/icopng.ico", "testout/ico_payload.png") == 0,
+              "wrap png as ico entry");
+
+        FILE *f = img_fopen_read("testout/icopng.ico");
+        img_image_t img;
+        int okd = f && ico_decode(f, &img, err, sizeof(err)) == 0;
+        if (f) fclose(f);
+        CHECK(okd, "decode ico(png)");
+        if (okd) {
+            CHECK(img.color == IMG_RGBA && img.bit_depth == 8 &&
+                  img.width == 16 && img.height == 12,
+                  "png entry decoded at native depth");
+            raw_png_t rp;
+            if (read_png_native("testout/ico_payload.png", &rp) == 0) {
+                int same = (rp.width == img.width && rp.height == img.height &&
+                            rp.bit_depth == 8);
+                for (int y = 0; y < img.height && same; y++)
+                    for (int x = 0; x < img.width * 4; x++)
+                        if (rp.data[(size_t)y * rp.rowstride + x] !=
+                            img.data[(size_t)y * img.rowstride + x])
+                            same = 0;
+                CHECK(same, "pixels match the source PNG");
+                raw_png_free(&rp);
+            } else {
+                CHECK(0, "re-read payload png");
+            }
+            img_free(&img);
+        }
+    }
+
+    /* --- TIFF sub-byte grayscale (2/4-bit): the destination used to be
+     *     written 1 bit per pixel regardless of the source depth --- */
+    printf("TIFF sub-byte gray (2/4-bit):\n");
+    {
+        static const int bits_tab[2] = {2, 4};
+        const int w = 16, h = 2;
+        for (int k = 0; k < 2; k++) {
+            int bits = bits_tab[k];
+            uint8_t vals[16 * 2];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    vals[y * w + x] = (uint8_t)((x + y) % (depth_max(bits) + 1));
+            char in[64];
+            snprintf(in, sizeof(in), "testout/g%d.tiff", bits);
+            CHECK(tiff_write_subbyte_gray(in, w, h, bits, vals,
+                                          PHOTOMETRIC_MINISBLACK) == 0,
+                  "write gray tiff");
+            FILE *f = img_fopen_read(in);
+            img_image_t img;
+            int okd = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+            if (f) fclose(f);
+            CHECK(okd, "decode gray tiff");
+            if (okd) {
+                CHECK(img.color == IMG_GRAY && img.bit_depth == bits,
+                      "GRAY at source depth");
+                int ok = 1;
+                for (int y = 0; y < h && ok; y++)
+                    for (int x = 0; x < w && ok; x++)
+                        if (get_sample(&img, x, y, 0) != vals[y * w + x]) ok = 0;
+                CHECK(ok, "samples identical");
+                img_free(&img);
+            }
+        }
+        /* MINISWHITE inversion must survive the repacking too */
+        {
+            int bits = 4;
+            uint8_t vals[16];
+            for (int x = 0; x < 16; x++)
+                vals[x] = (uint8_t)x;
+            CHECK(tiff_write_subbyte_gray("testout/gw4.tiff", 16, 1, bits, vals,
+                                          PHOTOMETRIC_MINISWHITE) == 0,
+                  "write gray tiff (MINISWHITE)");
+            FILE *f = img_fopen_read("testout/gw4.tiff");
+            img_image_t img;
+            int okd = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+            if (f) fclose(f);
+            CHECK(okd, "decode gray tiff (MINISWHITE)");
+            if (okd) {
+                int ok = (img.color == IMG_GRAY && img.bit_depth == bits);
+                for (int x = 0; x < 16 && ok; x++)
+                    if (get_sample(&img, x, 0, 0) != (unsigned)(15 - vals[x])) ok = 0;
+                CHECK(ok, "inverted samples identical");
+                img_free(&img);
+            }
+        }
+    }
+
+    /* --- TIFF sub-byte palette (2/4-bit) --- */
+    printf("TIFF sub-byte palette (2/4-bit):\n");
+    {
+        static const int bits_tab[2] = {2, 4};
+        const int w = 16, h = 2;
+        for (int k = 0; k < 2; k++) {
+            int bits = bits_tab[k];
+            int nc = 1 << bits;
+            uint8_t vals[16 * 2];
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    vals[y * w + x] = (uint8_t)((x + y) % nc);
+            char in[64];
+            snprintf(in, sizeof(in), "testout/p%d.tiff", bits);
+            CHECK(tiff_write_subbyte_palette(in, w, h, bits, vals) == 0,
+                  "write palette tiff");
+            FILE *f = img_fopen_read(in);
+            img_image_t img;
+            int okd = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+            if (f) fclose(f);
+            CHECK(okd, "decode palette tiff");
+            if (okd) {
+                CHECK(img.color == IMG_PALETTE && img.bit_depth == bits,
+                      "PALETTE at source depth");
+                CHECK(img.pal_ncolors == nc, "colormap size");
+                int cmap_ok = 1;
+                int step = (nc > 1) ? 255 / (nc - 1) : 255;   /* 16->8 scaled */
+                for (int i = 0; i < nc && cmap_ok; i++)
+                    if (img.palette[i * 3 + 0] != (uint8_t)(step * i) ||
+                        img.palette[i * 3 + 1] != (uint8_t)(255 - step * i) ||
+                        img.palette[i * 3 + 2] != (uint8_t)(step * i))
+                        cmap_ok = 0;
+                CHECK(cmap_ok, "colormap scaled 16->8 correctly");
+                int idx_ok = 1;
+                for (int y = 0; y < h && idx_ok; y++)
+                    for (int x = 0; x < w && idx_ok; x++)
+                        if (get_sample(&img, x, y, 0) != vals[y * w + x]) idx_ok = 0;
+                CHECK(idx_ok, "indices identical");
+                img_free(&img);
+            }
+        }
+    }
+
+    /* --- PNM P1/P4 bilevel --- */
+    printf("PNM P1/P4 bilevel -> GRAY1:\n");
+    {
+        const int w = 16, h = 4;
+        for (int ascii = 1; ascii >= 0; ascii--) {
+            const char *name = ascii ? "testout/tp1.pbm" : "testout/tp4.pbm";
+            CHECK(gen_pbm(name, w, h, ascii) == 0, "generate pbm");
+            FILE *f = img_fopen_read(name);
+            img_image_t img;
+            int okd = f && pnm_decode(f, &img, err, sizeof(err)) == 0;
+            if (f) fclose(f);
+            CHECK(okd, "decode pbm");
+            if (okd) {
+                CHECK(img.color == IMG_GRAY && img.bit_depth == 1, "format is GRAY1");
+                int ok = 1;
+                for (int y = 0; y < h && ok; y++)
+                    for (int x = 0; x < w && ok; x++) {
+                        /* PBM: 1 = black; PNG 1-bit gray: 1 = white */
+                        unsigned want = ((x + y) & 1) ? 0u : 1u;
+                        if (get_sample(&img, x, y, 0) != want) ok = 0;
+                    }
+                CHECK(ok, "black/white mapping and 1-bit packing");
+                img_free(&img);
+            }
+        }
+    }
+
+    /* --- PNM 16-bit: verify the actual sample values, not just the format --- */
+    printf("PNM P6 maxval 1023 -> RGB16 samples:\n");
+    {
+        const int w = 9, h = 7, maxval = 1023;
+        CHECK(gen_pnm("testout/t16v.ppm", w, h, 6, maxval) == 0, "generate ppm16");
+        FILE *f = img_fopen_read("testout/t16v.ppm");
+        img_image_t img;
+        int okd = f && pnm_decode(f, &img, err, sizeof(err)) == 0;
+        if (f) fclose(f);
+        CHECK(okd, "decode ppm16");
+        if (okd) {
+            CHECK(img.color == IMG_RGB && img.bit_depth == 16, "format is RGB16");
+            CHECK(png_write_file(&img, &opts, "testout/t16v.png", err, sizeof(err)) == 0,
+                  "encode png");
+            img_free(&img);
+            raw_png_t rp;
+            if (read_png_native("testout/t16v.png", &rp) == 0) {
+                int ok = (rp.bit_depth == 16 && rp.color_type == PNG_COLOR_TYPE_RGB);
+                for (int y = 0; y < h && ok; y++)
+                    for (int x = 0; x < w && ok; x++) {
+                        uint8_t v8[3] = { (uint8_t)(x * 255 / (w - 1)),
+                                          (uint8_t)(y * 255 / (h - 1)),
+                                          (uint8_t)((x ^ y) & 0xFF) };
+                        for (int c = 0; c < 3; c++) {
+                            unsigned s = (unsigned)v8[c] * (unsigned)maxval / 255u;
+                            unsigned want = (unsigned)((unsigned long long)s * 65535 /
+                                                       (unsigned)maxval);
+                            if (raw_sample(&rp, x, y, c) != want) ok = 0;
+                        }
+                    }
+                CHECK(ok, "16-bit samples match the source scaling");
+                raw_png_free(&rp);
+            } else {
+                CHECK(0, "read back 16-bit png");
+            }
+        }
+    }
+
+    /* --- PNG as input: native color type and depth must survive --- */
+    printf("PNG input round-trip (native depth preserved):\n");
+    {
+        static const struct {
+            img_color_t color; int depth; const char *name; int pal_trns;
+        } cs[] = {
+            {IMG_GRAY,        1,  "gray1",   0},
+            {IMG_GRAY,        2,  "gray2",   0},
+            {IMG_GRAY,        4,  "gray4",   0},
+            {IMG_GRAY,        8,  "gray8",   0},
+            {IMG_GRAY,        16, "gray16",  0},
+            {IMG_GRAY_ALPHA,  8,  "ga8",     0},
+            {IMG_GRAY_ALPHA,  16, "ga16",    0},
+            {IMG_PALETTE,     1,  "pal1",    1},
+            {IMG_PALETTE,     4,  "pal4",    1},
+            {IMG_PALETTE,     8,  "pal8",    0},
+            {IMG_RGB,         8,  "rgb8",    0},
+            {IMG_RGB,         16, "rgb16",   0},
+            {IMG_RGBA,        8,  "rgba8",   0},
+            {IMG_RGBA,        16, "rgba16",  0},
+        };
+        const int w = 13, h = 5;
+        for (size_t c = 0; c < sizeof(cs) / sizeof(cs[0]); c++) {
+            img_image_t src;
+            memset(&src, 0, sizeof(src));
+            src.width = w; src.height = h;
+            src.color = cs[c].color;
+            src.bit_depth = cs[c].depth;
+            int ch = img_channels(cs[c].color);
+            src.rowstride = img_rowstride(w, cs[c].depth, ch);
+            src.data = (uint8_t *)calloc((size_t)h, src.rowstride);
+            unsigned dmax = depth_max(cs[c].depth);
+            unsigned span = dmax + 1;
+            for (int y = 0; y < h; y++)
+                for (int x = 0; x < w; x++)
+                    for (int k = 0; k < ch; k++)
+                        put_sample(&src, x, y, k,
+                                   (unsigned)((x * 3 + y * 5 + k * 7) % span));
+            if (cs[c].color == IMG_PALETTE) {
+                src.pal_ncolors = 1 << cs[c].depth;
+                for (int i = 0; i < src.pal_ncolors; i++) {
+                    src.palette[i * 3 + 0] = (uint8_t)(i * 11);
+                    src.palette[i * 3 + 1] = (uint8_t)(i * 23);
+                    src.palette[i * 3 + 2] = (uint8_t)(i * 31);
+                    src.pal_alpha[i] = (uint8_t)(cs[c].pal_trns ? (i * 37) & 0xFF : 255);
+                }
+                src.has_pal_alpha = cs[c].pal_trns;
+            }
+
+            char path[64];
+            snprintf(path, sizeof(path), "testout/pngrt_%s.png", cs[c].name);
+            CHECK(png_write_file(&src, &opts, path, err, sizeof(err)) == 0, "write png");
+
+            /* feed the bytes back through the PNG-input decoder */
+            long n = -1;
+            uint8_t *buf = NULL;
+            FILE *f = img_fopen_read(path);
+            if (f) {
+                fseek(f, 0, SEEK_END);
+                n = ftell(f);
+                rewind(f);
+                buf = (uint8_t *)malloc((size_t)n);
+                if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) {
+                    free(buf);
+                    buf = NULL;
+                }
+                fclose(f);
+            }
+            img_image_t got;
+            int okd = buf && png_decode_mem(buf, (size_t)n, &got, err, sizeof(err)) == 0;
+            free(buf);
+            CHECK(okd, "png_decode_mem");
+            if (okd) {
+                CHECK(got.color == src.color && got.bit_depth == src.bit_depth,
+                      "color type and depth preserved");
+                CHECK(got.width == w && got.height == h, "size preserved");
+                int ok = 1;
+                for (int y = 0; y < h && ok; y++)
+                    for (int x = 0; x < w && ok; x++)
+                        for (int k = 0; k < ch; k++)
+                            if (get_sample(&got, x, y, k) != get_sample(&src, x, y, k))
+                                ok = 0;
+                CHECK(ok, "samples identical");
+                if (cs[c].color == IMG_PALETTE) {
+                    int pok = (got.pal_ncolors == src.pal_ncolors);
+                    for (int i = 0; i < src.pal_ncolors && pok; i++) {
+                        if (got.palette[i * 3 + 0] != src.palette[i * 3 + 0] ||
+                            got.palette[i * 3 + 1] != src.palette[i * 3 + 1] ||
+                            got.palette[i * 3 + 2] != src.palette[i * 3 + 2])
+                            pok = 0;
+                        if (cs[c].pal_trns && got.pal_alpha[i] != src.pal_alpha[i])
+                            pok = 0;
+                    }
+                    CHECK(pok, "palette (and tRNS) preserved");
+                }
+                img_free(&got);
+            }
+            img_free(&src);
+        }
+    }
+
+    /* --- PNG input: gray+tRNS is kept, RGB+tRNS expands to RGBA --- */
+    printf("PNG input tRNS handling:\n");
+    {
+        img_image_t src;
+        memset(&src, 0, sizeof(src));
+        src.width = 8; src.height = 4; src.color = IMG_GRAY; src.bit_depth = 8;
+        src.rowstride = img_rowstride(8, 8, 1);
+        src.data = (uint8_t *)calloc(4, src.rowstride);
+        for (int y = 0; y < 4; y++)
+            for (int x = 0; x < 8; x++)
+                put_sample(&src, x, y, 0, (unsigned)(x * 8 + y));
+        src.has_gray_trns = 1;
+        src.gray_trns_value = 42;
+        CHECK(png_write_file(&src, &opts, "testout/gray_trns.png", err, sizeof(err)) == 0,
+              "write gray+tRNS png");
+        img_free(&src);
+
+        long n = -1;
+        uint8_t *buf = NULL;
+        FILE *f = img_fopen_read("testout/gray_trns.png");
+        if (f) {
+            fseek(f, 0, SEEK_END); n = ftell(f); rewind(f);
+            buf = (uint8_t *)malloc((size_t)n);
+            if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); buf = NULL; }
+            fclose(f);
+        }
+        img_image_t got;
+        int okd = buf && png_decode_mem(buf, (size_t)n, &got, err, sizeof(err)) == 0;
+        free(buf);
+        CHECK(okd, "decode gray+tRNS");
+        if (okd) {
+            CHECK(got.color == IMG_GRAY && got.bit_depth == 8 &&
+                  got.has_gray_trns && got.gray_trns_value == 42,
+                  "gray + tRNS preserved");
+            img_free(&got);
+        }
+
+        /* RGB + tRNS: transparency is kept by expanding to RGBA.  The project
+         * encoder never writes RGB tRNS, so build that PNG with libpng. */
+        {
+            const int rw = 4, rh = 2;
+            FILE *wf = img_fopen_write("testout/rgb_trns.png");
+            png_err_t pe2;
+            png_structp png = wf ? png_create_write_struct(PNG_LIBPNG_VER_STRING, &pe2,
+                                                           pngerr_error, pngerr_warn) : NULL;
+            png_infop info = png ? png_create_info_struct(png) : NULL;
+            int wrote = 0;
+            if (png && info && setjmp(pe2.jb) == 0) {
+                png_init_io(png, wf);
+                png_set_IHDR(png, info, (png_uint_32)rw, (png_uint_32)rh, 8,
+                             PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
+                             PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+                png_color_16 trns;
+                memset(&trns, 0, sizeof(trns));
+                trns.red = 0; trns.green = 0; trns.blue = 7;
+                png_set_tRNS(png, info, NULL, 0, &trns);
+                png_write_info(png, info);
+                uint8_t raw[4 * 3 * 2];
+                png_bytep rows[2];
+                for (int y = 0; y < rh; y++) {
+                    for (int x = 0; x < rw; x++) {
+                        raw[(y * rw + x) * 3 + 0] = (uint8_t)(x * 20);
+                        raw[(y * rw + x) * 3 + 1] = (uint8_t)(y * 30);
+                        raw[(y * rw + x) * 3 + 2] = 7;
+                    }
+                    rows[y] = raw + y * rw * 3;
+                }
+                png_write_image(png, rows);
+                png_write_end(png, NULL);
+                wrote = 1;
+            }
+            if (png) png_destroy_write_struct(&png, &info);
+            if (wf) fclose(wf);
+            CHECK(wrote, "write rgb+tRNS png");
+
+            long rn = -1;
+            uint8_t *rbuf = NULL;
+            FILE *rf = img_fopen_read("testout/rgb_trns.png");
+            if (rf) {
+                fseek(rf, 0, SEEK_END); rn = ftell(rf); rewind(rf);
+                rbuf = (uint8_t *)malloc((size_t)rn);
+                if (!rbuf || fread(rbuf, 1, (size_t)rn, rf) != (size_t)rn) {
+                    free(rbuf); rbuf = NULL;
+                }
+                fclose(rf);
+            }
+            img_image_t rt;
+            int rok = rbuf && png_decode_mem(rbuf, (size_t)rn, &rt, err, sizeof(err)) == 0;
+            free(rbuf);
+            CHECK(rok, "decode rgb+tRNS");
+            if (rok) {
+                CHECK(rt.color == IMG_RGBA && rt.bit_depth == 8,
+                      "RGB+tRNS expands to RGBA8");
+                CHECK(get_sample(&rt, 0, 0, 3) == 0 &&
+                      get_sample(&rt, 1, 0, 3) == 255,
+                      "tRNS colour becomes transparent");
+                img_free(&rt);
+            }
+        }
     }
 
     printf("\n%s (%d failures)\n", g_failures ? "SELF-TEST FAILED" : "SELF-TEST PASSED", g_failures);

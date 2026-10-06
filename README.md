@@ -2,21 +2,57 @@
 
 English | [中文](README.zh.md)
 
-A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6.59, libjpeg-turbo 3.2.0, giflib, libwebp and libtiff.
+A lossless multi-format image → PNG converter (CLI + GUI). Reads **BMP / TGA / PNM / ICO /
+JPEG / PNG / GIF / QOI / WebP / TIFF / HEIF / AVIF**, writes lossless PNG — or animated PNG
+(APNG) when the input is an animated GIF.
+
+## Contents
+
+- [Features](#features)
+- [Supported input formats](#supported-input-formats)
+- [Building](#building)
+- [CLI usage](#cli-usage)
+- [GUI usage](#gui-usage)
+- [Testing](#testing)
+- [Design notes](#design-notes)
+- [Known limitations](#known-limitations)
+- [Third-party libraries](#third-party-libraries)
 
 ## Features
 
-- **Animated GIF → APNG**: multi-frame GIFs become animated PNGs with frame delays, loop counts, per-frame transparency and disposal semantics preserved
-- **Bit-depth matching** (default): the output PNG's color type and bit depth faithfully match the source image — no silent upgrades or downgrades
-- **Lossless compression**: zlib compression level 0–9 (default 9); adaptive row filtering by default
+**Conversion**
+
+- **Bit-depth matching** (default): the output PNG's color type and bit depth faithfully
+  match the source image — no silent upgrades or downgrades (see the table below)
+- **Animated GIF → APNG**: multi-frame GIFs become animated PNGs with frame delays, loop
+  counts, per-frame transparency and disposal semantics preserved
+- **PNG re-encoding**: PNG inputs are re-encoded with the current settings — pixels
+  unchanged, handy for squeezing PNGs produced by other tools
+- **Always lossless**: compression level and filters only affect size and speed
+
+**Output control**
+
+- **Lossless compression**: zlib level 0–9 (default 9); adaptive row filtering by default
+- **Timestamp preservation**: output files keep the input's creation and modification
+  times, including in-place recompression
+
+**Workflow**
+
 - **Folder batch processing**: point it at a folder — subdirectories are scanned recursively
 - **Multithreading**: thread-pool parallel conversion, defaults to the number of logical CPUs
-- **Timestamp preservation**: output files keep the input's creation and modification times (even for in-place recompression)
-- **PNG re-encoding**: PNG inputs are re-encoded with the current settings — pixels unchanged, perfect for squeezing PNGs produced by other tools
-- **Vendored dependencies**: zlib / libpng / libjpeg-turbo sources are bundled in `thirdparty/` — builds fully offline, no network or manual installs needed
-- **Cross-platform**: one CMake build for Windows / Linux / macOS — GitHub Actions builds all three automatically (see `.github/workflows/build.yml`)
+- **Graphical front end** with drag & drop, an English/Chinese toggle and an
+  overwrite-originals mode (see [GUI usage](#gui-usage))
 
-## Supported input formats & bit-depth matching rules
+**Build**
+
+- **Self-contained**: zlib / libpng / libjpeg-turbo (and every other codec) ship as trimmed
+  sources in `thirdparty/` — builds fully offline, no network access or manual installs
+- **Cross-platform**: one CMake build for Windows / Linux / macOS; GitHub Actions builds and
+  tests all three
+
+## Supported input formats
+
+### Bit-depth matching rules
 
 | Input | Output PNG |
 |---|---|
@@ -25,27 +61,35 @@ A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6
 | BMP 32-bit (with alpha mask) | 8-bit RGBA |
 | BMP 32-bit (no mask, BI_RGB) | 8-bit RGB (the 4th byte is undefined — not treated as alpha) |
 | TGA 8-bit gray / 24-bit / 32-bit | GRAY / RGB / RGBA |
-| PNM grayscale (P1/P2/P4/P5) | GRAY (PBM keeps 1-bit), maxval>255 → 16-bit |
-| PNM color (P3/P6) | RGB, maxval>255 → 16-bit |
+| PNM grayscale (P1/P2/P4/P5) | GRAY (PBM keeps 1-bit); maxval > 255 → 16-bit |
+| PNM color (P3/P6) | RGB; maxval > 255 → 16-bit |
 | JPEG grayscale / color | GRAY / RGB |
-| ICO | largest entry decoded; embedded BMP/PNG keeps its color type and depth |
-| GIF | animated GIFs become **animated PNG (APNG)** — frame delays, loop count, per-frame transparency and disposal preserved; single-frame GIFs become PALETTE8 with tRNS |
+| PNG | color type and bit depth preserved (1/2/4/8/16, palette tRNS, gray tRNS); RGB+tRNS expands to RGBA so the transparency survives |
+| GIF | single-frame GIFs → PALETTE8 with tRNS; animated GIFs → APNG (see above) |
+| ICO | largest entry decoded; an embedded BMP/PNG keeps its color type and depth. An AND mask that carries transparency promotes 24/32-bit entries to RGBA, and gives palette entries tRNS |
 | QOI | 8-bit RGB / RGBA |
-| WebP | 8-bit RGB / RGBA (lossy & lossless) |
-| TIFF | 8-bit RGBA via the RGBA interface (all photometric variants) |
-| PNG | re-encoded with the current settings (lossless) |
+| WebP | 8-bit RGB / RGBA (lossy and lossless) |
+| TIFF | bit-depth matched for contiguous images: gray 1/2/4/8/16, palette 1/2/4/8, RGB/RGBA 8/16. Other variants (CMYK, YCbCr, tiled, separate planes, float) fall back to 8-bit RGBA through the RGBA interface |
+| HEIF / AVIF | 8-bit RGB → 8-bit RGBA; 10/12-bit sources → 16-bit RGBA |
 
-`--auto` optimization mode (off by default): drop a fully-opaque alpha channel, collapse pure-grayscale RGB to GRAY.
+`--auto` optimization mode (off by default) additionally drops a fully opaque alpha channel
+and collapses pure-grayscale RGB to GRAY.
+
+### Depths that are rejected
+
+Source depths that cannot be represented are reported as an error rather than silently
+converted: **16-bit BMP**, **15/16-bit truecolor TGA** and **16-bit ICO entries**.
 
 ## Building
 
 ### Requirements
 
 - CMake ≥ 3.21
-- A C compiler (Windows: MinGW-w64 gcc, tested; Linux: gcc/clang; macOS: clang via Xcode command-line tools)
+- A C compiler — Windows: MinGW-w64 gcc (tested); Linux: gcc/clang; macOS: clang from the
+  Xcode command-line tools
 - Linux: `sudo apt install cmake ninja-build g++ qt6-base-dev` · macOS: `brew install cmake ninja qt`
-- **zlib / libpng / libjpeg-turbo are vendored in `thirdparty/`** (trimmed source copies, built together automatically) — **no network access and no manual installs required**
-- Qt 6 (optional, only for the GUI; the CLI builds automatically when Qt is absent)
+- Qt 6 — optional, only needed for the GUI; the CLI still builds when Qt is absent
+- No third-party packages to install: every codec is vendored in `thirdparty/`
 
 ### Steps
 
@@ -54,11 +98,18 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH="<Qt
 cmake --build build
 ```
 
-Outputs: `build/img2png.exe` (CLI), `build/img2png-gui.exe` (GUI), `build/img2png_selftest.exe` (tests).
+Outputs: `build/img2png` (CLI), `build/img2png-gui` (GUI) and `build/img2png_selftest`
+(tests) — plus the `.exe` suffix on Windows.
 
-### Alternative dependency resolution (optional)
+Drop `-DCMAKE_PREFIX_PATH` to build without a Qt installation: the GUI target is skipped
+automatically. Use `-DIMG2PNG_GUI=OFF` to skip it explicitly.
 
-Priority order: vendored `thirdparty/` → local override flags → online download (FetchContent with multiple source mirrors).
+### Dependency resolution
+
+Priority order: vendored `thirdparty/` → local override flags → online download
+(FetchContent, with several source mirrors).
+
+For the three dependencies that have override flags:
 
 ```bash
 cmake -S . -B build -G Ninja -DIMG2PNG_GUI=OFF \
@@ -67,14 +118,19 @@ cmake -S . -B build -G Ninja -DIMG2PNG_GUI=OFF \
   -DLIBJPEG_PREBUILT_DIR=<libjpeg-turbo install dir (with include/ and lib/)>
 ```
 
-GIF/QOI/WebP/TIFF support is built in via vendored `thirdparty/` sources — nothing
-extra to install. libtiff is configured without optional codecs (deflate is kept via
-the vendored zlib).
-```
-
 `LIBJPEG_PREBUILT_DIR` may also point at an extracted official libjpeg-turbo Windows
-installer package (the gcc variant); the build statically links its `lib/libjpeg.a`,
-producing executables with no third-party DLL dependencies.
+installer package (the gcc variant); the build statically links its `lib/libjpeg.a`, so the
+resulting executables have no third-party DLL dependencies.
+
+GIF / QOI / WebP / TIFF / HEIF / AVIF support comes from the vendored `thirdparty/` sources —
+nothing extra to install. libtiff is configured without its optional codecs (deflate is kept
+via the vendored zlib).
+
+### CI and releases
+
+`.github/workflows/build.yml` builds and runs the self-test on Windows (MSYS2/MinGW),
+Ubuntu and macOS. Pushing a `v*` tag runs the same three jobs and then publishes a Release
+with the windows-x64, linux-x64 and macOS packages attached.
 
 ## CLI usage
 
@@ -92,46 +148,61 @@ img2png [-o out.png|outdir] [-l 0-9] [-f auto|none|sub|up|avg|paeth|all|fast]
 | `--auto` | optimization mode (drop useless alpha / grayscale detection) | off |
 | `--no-keep-time` | do not copy timestamps from the input | timestamps are kept |
 
+Behavior notes:
+
 - Inputs may be files or **folders** (scanned recursively)
-- Without `-o`: non-PNG files produce a same-name `.png` next to the input; PNG files are **recompressed in place**
+- Without `-o`: non-PNG files produce a same-name `.png` next to the input; PNG files are
+  **recompressed in place**
 - Output files keep the input's creation and modification times
+- In `-o outdir` mode the output is flattened by file name, so identically-named files from
+  different subdirectories would overwrite each other
 
 Examples:
 
 ```bash
 img2png photo.jpg                      # -> photo.png
-img2png my-pictures                    # convert a whole folder recursively (PNGs recompressed in place)
+img2png my-pictures                    # whole folder, recursively (PNGs recompressed in place)
 img2png -o outdir folder *.bmp *.jpg   # output to outdir
 img2png -l 6 -f paeth --auto a.ppm     # custom level / filter / auto-optimize
 ```
 
-Note: in `-o outdir` mode the output is flattened by file name; identically-named files
-from different subdirectories would overwrite each other.
-
 ## GUI usage
 
-`img2png-gui.exe` (GUI subsystem — no console window; needs the Qt6Core/Gui/Widgets DLLs on PATH):
+`img2png-gui` (GUI subsystem — no console window; the Qt6Core/Gui/Widgets libraries must be
+reachable, i.e. on `PATH` on Windows):
 
-- Drag & drop **files or folders** onto the window (folders are scanned recursively), or use "Add files…" / "Add folder…"
+- Drag & drop **files or folders** onto the window (folders are scanned recursively), or use
+  "Add files…" / "Add folder…"
 - Compression level slider 0–9 (default 9), filter dropdown (default "adaptive"), thread count
-- **UI language**: 中文/English dropdown (top right of the window) — applies instantly and is remembered (default: Chinese)
-- "Match source bit depth strictly" (checked by default; unchecking enables auto-optimization), "keep timestamps" (default checked)
+- **UI language**: 中文/English dropdown in the top right — applies instantly and is
+  remembered (default: Chinese)
+- "Match source bit depth strictly" (checked by default; unchecking enables auto-optimization)
+  and "keep timestamps" (default checked)
 - **"Overwrite originals"** (unchecked by default):
-  - when the output path equals the input path, unchecked skips the file with a notice; checked allows in-place overwriting (lossless, timestamps kept)
-  - when checked, a non-PNG file converted into its own folder is deleted after a successful conversion, replaced by the same-name `.png` (noted in the log)
+  - when the output path equals the input path, unchecked skips the file with a notice;
+    checked allows in-place overwriting (lossless, timestamps kept)
+  - when checked, a non-PNG file converted into its own folder is deleted after a successful
+    conversion, replaced by the same-name `.png` (noted in the log)
   - outputs going to a different directory never delete anything
-- **The output-directory box accepts drag & drop**: drop a folder to fill in the path; drop a file to fill in its folder
+- **The output-directory box accepts drag & drop**: drop a folder to fill in the path; drop a
+  file to fill in its folder
 - Click "Convert" — the log shows each file's result in real time
 
-## Tests
+## Testing
 
 ```bash
-./build/img2png_selftest.exe             # full self-test suite
-./build/img2png_selftest.exe some.png    # verify any PNG decodes
+./build/img2png_selftest            # full self-test suite
+./build/img2png_selftest some.png   # verify that any PNG decodes
 ```
 
-Covers: per-format decode correctness, bit-depth/color-type matching, pixel-by-pixel
-lossless verification, all filter modes, compression levels, timestamp preservation.
+The suite generates sample files for every supported input format, converts them through the
+same core code the CLI uses, then reads the PNGs back and compares pixel by pixel — 300+
+assertions covering per-format decode correctness, bit-depth and color-type matching
+(including sub-byte depths: 1/2/4-bit palettes and grayscale, and 16-bit gray/RGB/RGBA),
+palette and tRNS handling, every filter mode, compression levels and timestamp preservation.
+
+PNG outputs are re-read twice: once expanded to 8-bit RGBA for pixel comparison, and once at
+their **native** bit depth to prove the depth really was preserved.
 
 ## Design notes
 
@@ -139,17 +210,20 @@ lossless verification, all filter modes, compression levels, timestamp preservat
 - **PNG re-encoding**: decoded pixels are recompressed with the new settings, unchanged
 - **JPEG sources**: already lossy; decoded pixels are written to PNG without any further loss
 - **Compression details**: the level goes through `png_set_compression_level()` to zlib;
-  "adaptive filtering" is libpng's default behavior (try several filters per row and pick
-  the best; palette images skip filtering automatically)
+  "adaptive filtering" is libpng's default behavior (try several filters per row and pick the
+  best; palette images skip filtering automatically)
 - **No GPU**: GPU deflate integration is costly for little gain on single images; CPU
   multithreading already saturates all cores
 
 ## Known limitations
 
-- 16-bit BMP input is not supported
-- `-o outdir` flattens the output; identically-named files from different subdirectories overwrite each other
+- Source depths that cannot be represented are rejected — see
+  [Depths that are rejected](#depths-that-are-rejected)
+- `-o outdir` flattens the output; identically-named files from different subdirectories
+  overwrite each other
 - On Windows, paths are handled via the ANSI code page; Linux/macOS use UTF-8
-- Windows x64 is tested locally; Linux/macOS builds run in CI (`.github/workflows/build.yml`) but have not been verified on real hardware yet
+- Windows x64 is tested locally; the Linux/macOS builds run in CI
+  (`.github/workflows/build.yml`) but have not been verified on real hardware yet
 - MSVC should work but is unverified
 
 ## Third-party libraries
@@ -169,13 +243,12 @@ lossless verification, all filter modes, compression levels, timestamp preservat
 | libpng APNG patch | for 1.6.59 | same as libpng | [APNG patch](https://sourceforge.net/projects/apng/files/libpng-apng/) (applied to `thirdparty/libpng`, powers GIF → APNG output) |
 | Qt 6 (optional, GUI only) | 6.x | LGPL-3.0 / GPL | [qt.io](https://www.qt.io/) |
 
-All vendored libraries are trimmed copies (docs, test assets, other architectures'
+All vendored libraries are trimmed copies (docs, test assets and other architectures'
 SIMD/asm code removed) that retain their original license files; see each directory
-(libpng: LICENSE / LICENSES, zlib: LICENSE, libjpeg-turbo: LICENSE.md,
-giflib: COPYING, libwebp: COPYING, tiff: LICENSE.md, libde265 / libheif: COPYING,
-libavif: LICENSE, dav1d: COPYING).
+(libpng: LICENSE / LICENSES, zlib: LICENSE, libjpeg-turbo: LICENSE.md, giflib: COPYING,
+libwebp: COPYING, tiff: LICENSE.md, libde265 / libheif: COPYING, libavif: LICENSE,
+dav1d: COPYING).
 
-**LGPL-3.0 note** (libde265 / libheif): vendoring the sources and statically linking
-them is permitted; if you distribute modified binaries of this tool, follow the LGPL
-obligations for the library parts (provide the library source or a relinkable
-object-file form).
+**LGPL-3.0 note** (libde265 / libheif): vendoring the sources and statically linking them is
+permitted; if you distribute modified binaries of this tool, follow the LGPL obligations for
+the library parts (provide the library source or a relinkable object-file form).

@@ -68,6 +68,24 @@ void   img_free_anim(img_animation_t *anim);
 static inline void img_st16be(uint8_t *p, unsigned v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
 static inline unsigned img_ld16be(const uint8_t *p)   { return ((unsigned)p[0] << 8) | p[1]; }
 
+/* Sub-byte (1/2/4-bit) sample access for rows packed MSB-first, the layout
+ * PNG and BMP/ICO/TIFF all use.  Use these instead of open-coding the shift
+ * arithmetic; the source and destination rows must share the same depth. */
+static inline unsigned img_ld_bits(const uint8_t *row, int index, int bits)
+{
+    size_t bit = (size_t)index * (size_t)bits;
+    return ((unsigned)row[bit >> 3] >> (8 - (int)(bit & 7) - bits)) &
+           ((1u << bits) - 1u);
+}
+
+/* OR `v` into a zeroed destination row (rows are allocated with calloc). */
+static inline void img_st_bits(uint8_t *row, int index, int bits, unsigned v)
+{
+    size_t bit = (size_t)index * (size_t)bits;
+    row[bit >> 3] |= (uint8_t)((v & ((1u << bits) - 1u)) <<
+                               (8 - (int)(bit & 7) - bits));
+}
+
 /* Open a file for reading/writing; paths come from the ANSI command line,
  * so they are widened with the ANSI codepage.  Returns NULL on failure. */
 FILE *img_fopen_read(const char *path);

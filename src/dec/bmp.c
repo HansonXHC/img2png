@@ -153,15 +153,19 @@ int bmp_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
         switch (img->color) {
         case IMG_PALETTE: {
             if (bpp == 8) {
-                for (x = 0; x < width; x++) d[x] = srow[x];
-            } else {
-                memset(d, 0, img->rowstride);
+                /* clr_used may declare fewer entries than the depth allows;
+                 * clamp stray indices so the PNG palette stays valid */
                 for (x = 0; x < width; x++) {
-                    int bitpos = x * (int)bpp;
-                    int byte = srow[bitpos >> 3];
-                    int shift = 8 - (bitpos & 7) - (int)bpp;
-                    unsigned idx = (byte >> shift) & ((1u << bpp) - 1u);
-                    d[x] = (uint8_t)idx;
+                    unsigned idx = srow[x];
+                    d[x] = (uint8_t)(idx < (unsigned)npal ? idx : 0);
+                }
+            } else {
+                /* 1/4-bit indices: repack MSB-first at the same depth as the
+                 * destination row (img->bit_depth == bpp).  img->data is
+                 * calloc'd, so OR-ing into the target row is safe. */
+                for (x = 0; x < width; x++) {
+                    unsigned idx = img_ld_bits(srow, x, (int)bpp);
+                    img_st_bits(d, x, (int)bpp, idx < (unsigned)npal ? idx : 0);
                 }
             }
             break;
