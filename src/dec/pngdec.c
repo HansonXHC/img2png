@@ -131,6 +131,67 @@ int png_decode_mem(const uint8_t *data, size_t size, img_image_t *img,
         }
     }
 
+    /* ---- metadata: resolution, EXIF, ICC profile, text (incl. XMP) ---- */
+    {
+        img_meta_t *m = &img->meta;
+        png_uint_32 rx = 0, ry = 0;
+        int unit = 0;
+        if (png_get_pHYs(png, info, &rx, &ry, &unit) &&
+            unit == PNG_RESOLUTION_METER && rx && ry) {
+            m->have_dpi = 1;
+            m->dpi_x = rx * 0.0254;             /* pixels/metre -> dots/inch */
+            m->dpi_y = ry * 0.0254;
+        }
+
+        png_uint_32 exif_len = 0;
+        png_bytep exif = NULL;
+        if (png_get_eXIf_1(png, info, &exif_len, &exif) && exif && exif_len)
+            img_meta_set_exif(m, exif, exif_len);
+
+        png_charp icc_name = NULL;
+        png_bytep icc = NULL;
+        png_uint_32 icc_len = 0;
+        int icc_comp = 0;
+        if (png_get_iCCP(png, info, &icc_name, &icc_comp, &icc, &icc_len) &&
+            icc && icc_len)
+            img_meta_set_blob(&m->icc, &m->icc_len, icc, icc_len);
+
+        png_textp text = NULL;
+        int ntext = 0;
+        if (png_get_text(png, info, &text, &ntext) > 0) {
+            for (int i = 0; i < ntext; i++) {
+                if (!text[i].text || !text[i].key)
+                    continue;
+                size_t vlen = text[i].itxt_length ? text[i].itxt_length
+                                                  : strlen(text[i].text);
+                if (!strcmp(text[i].key, "XML:com.adobe.xmp")) {
+                    img_meta_set_blob((uint8_t **)&m->xmp, &m->xmp_len,
+                                      text[i].text, vlen);
+                    continue;   /* not repeated as a plain text chunk */
+                }
+                int kind = IMG_TEXT_TEXT;
+                if (text[i].compression == PNG_TEXT_COMPRESSION_zTXt)
+                    kind = IMG_TEXT_ZTXT;
+                else if (text[i].compression == PNG_ITXT_COMPRESSION_NONE)
+                    kind = IMG_TEXT_ITXT;
+                else if (text[i].compression == PNG_ITXT_COMPRESSION_zTXt)
+                    kind = IMG_TEXT_ITXT_Z;
+                img_meta_add_text(m, text[i].key, text[i].text, kind);
+            }
+        }
+
+        /* no pHYs: the resolution may still be in EXIF */
+        if (!m->have_dpi && m->exif) {
+            double x, y;
+            int u;
+            if (img_exif_resolution(m->exif, m->exif_len, &x, &y, &u)) {
+                m->have_dpi = 1;
+                m->dpi_x = x;
+                m->dpi_y = y;
+            }
+        }
+    }
+
     img->data = (uint8_t *)malloc(img->rowstride * h);
     png_bytep *rows = (png_bytep *)malloc(sizeof(png_bytep) * h);
     if (!img->data || !rows) {

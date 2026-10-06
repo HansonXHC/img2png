@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(img2png VERSION 1.4.0 LANGUAGES C CXX)
+project(img2png VERSION 1.5.0 LANGUAGES C CXX)
 
 option(IMG2PNG_GUI "Build the Qt GUI" ON)
 option(IMG2PNG_TESTS "Build tests" ON)
@@ -286,7 +286,7 @@ if(NOT WIN32)
 endif()
 
 target_link_libraries(img2png_core PUBLIC ${IMG2PNG_PNG_TARGET} ${IMG2PNG_JPEG_TARGET}
-    giflib_v qoi webp tiff heif avif)
+    giflib_v qoi webp webpdemux tiff heif avif)
 
 # libjpeg-turbo's targets don't carry PUBLIC include dirs (upstream expects
 # an install layout), so add them directly for source-tree integrations

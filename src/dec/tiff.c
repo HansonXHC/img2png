@@ -72,7 +72,6 @@ static int tiff_decode_matched(TIFF *tif, img_image_t *img,
     if (planar != PLANARCONFIG_CONTIG)
         return -1;                              /* caller falls back */
 
-    memset(img, 0, sizeof(*img));
     img->width = (int)w;
     img->height = (int)h;
 
@@ -231,6 +230,217 @@ static int tiff_decode_matched(TIFF *tif, img_image_t *img,
     return -1;                                  /* caller falls back */
 }
 
+/* ---------------------------------------------------------------------------
+ * Metadata
+ *
+ * A TIFF's IFD0 already holds the tags EXIF cares about, so the ones worth
+ * keeping are copied into a small EXIF payload that the PNG encoder writes as
+ * an eXIf chunk.  Only IFD0 tags are mirrored - the EXIF sub-IFD (exposure
+ * time, F-number, ISO, ...) is not rebuilt.
+ * ------------------------------------------------------------------------ */
+
+typedef struct {
+    uint8_t *buf;
+    size_t   len, cap;
+} eb_t;
+
+static int eb_put(eb_t *b, const void *src, size_t n)
+{
+    if (b->len + n > b->cap) {
+        size_t cap = b->cap ? b->cap : 256;
+        while (cap < b->len + n)
+            cap *= 2;
+        uint8_t *p = (uint8_t *)realloc(b->buf, cap);
+        if (!p)
+            return -1;
+        b->buf = p;
+        b->cap = cap;
+    }
+    memcpy(b->buf + b->len, src, n);
+    b->len += n;
+    return 0;
+}
+
+static int eb_u16(eb_t *b, unsigned v)
+{
+    uint8_t x[2] = { (uint8_t)v, (uint8_t)(v >> 8) };
+    return eb_put(b, x, 2);
+}
+
+static int eb_u32(eb_t *b, unsigned v)
+{
+    uint8_t x[4] = { (uint8_t)v, (uint8_t)(v >> 8),
+                     (uint8_t)(v >> 16), (uint8_t)(v >> 24) };
+    return eb_put(b, x, 4);
+}
+
+#define EXIF_MAX_ENT 12
+
+typedef struct {
+    unsigned tag, type, count;
+    uint8_t *data;      /* value bytes (little-endian, as EXIF requires here) */
+    size_t   dlen;
+} eb_ent_t;
+
+static int ent_add(eb_ent_t *e, int *n, unsigned tag, unsigned type,
+                   unsigned count, const void *data, size_t dlen)
+{
+    if (*n >= EXIF_MAX_ENT)
+        return -1;
+    eb_ent_t *x = &e[*n];
+    memset(x, 0, sizeof(*x));
+    x->tag = tag;
+    x->type = type;
+    x->count = count;
+    if (dlen) {
+        x->data = (uint8_t *)malloc(dlen);
+        if (!x->data)
+            return -1;
+        memcpy(x->data, data, dlen);
+        x->dlen = dlen;
+    }
+    (*n)++;
+    return 0;
+}
+
+static void rational_le(double v, uint8_t out[8])
+{
+    unsigned num, den;
+    if (v > 0 && v < 4294967295.0 && v == (double)(unsigned)v) {
+        num = (unsigned)v;
+        den = 1;
+    } else if (v > 0 && v * 1000.0 < 4294967295.0) {
+        num = (unsigned)(v * 1000.0 + 0.5);
+        den = 1000;
+    } else {
+        num = 0;
+        den = 1;
+    }
+    out[0] = (uint8_t)num;        out[1] = (uint8_t)(num >> 8);
+    out[2] = (uint8_t)(num >> 16); out[3] = (uint8_t)(num >> 24);
+    out[4] = (uint8_t)den;        out[5] = (uint8_t)(den >> 8);
+    out[6] = (uint8_t)(den >> 16); out[7] = (uint8_t)(den >> 24);
+}
+
+/* Serialise the collected entries as a little-endian TIFF/EXIF payload. */
+static uint8_t *exif_build(const eb_ent_t *e, int n, size_t *out_len)
+{
+    eb_t b;
+    memset(&b, 0, sizeof(b));
+    if (eb_put(&b, "II", 2) || eb_u16(&b, 42) || eb_u32(&b, 8) ||
+        eb_u16(&b, (unsigned)n))
+        goto fail;
+
+    size_t run = 8 + 2 + (size_t)n * 12 + 4;    /* where out-of-line data goes */
+    for (int i = 0; i < n; i++) {
+        if (eb_u16(&b, e[i].tag) || eb_u16(&b, e[i].type) || eb_u32(&b, e[i].count))
+            goto fail;
+        if (e[i].dlen > 4) {
+            if (eb_u32(&b, (unsigned)run))
+                goto fail;
+            run += e[i].dlen + (e[i].dlen & 1);
+        } else {
+            uint8_t v[4] = { 0, 0, 0, 0 };
+            memcpy(v, e[i].data, e[i].dlen);
+            if (eb_put(&b, v, 4))
+                goto fail;
+        }
+    }
+    if (eb_u32(&b, 0))                          /* no next IFD */
+        goto fail;
+    for (int i = 0; i < n; i++) {
+        if (e[i].dlen > 4) {
+            if (eb_put(&b, e[i].data, e[i].dlen))
+                goto fail;
+            if (e[i].dlen & 1) {                    /* keep offsets even */
+                uint8_t z = 0;
+                if (eb_put(&b, &z, 1))
+                    goto fail;
+            }
+        }
+    }
+    *out_len = b.len;
+    return b.buf;
+fail:
+    free(b.buf);
+    return NULL;
+}
+
+static void tiff_meta(TIFF *tif, img_meta_t *m)
+{
+    float xr = 0, yr = 0;
+    uint16_t ru = RESUNIT_INCH;
+    int have_x = TIFFGetField(tif, TIFFTAG_XRESOLUTION, &xr) == 1;
+    int have_y = TIFFGetField(tif, TIFFTAG_YRESOLUTION, &yr) == 1;
+    TIFFGetField(tif, TIFFTAG_RESOLUTIONUNIT, &ru);
+    if (have_x && have_y && xr > 0 && yr > 0) {
+        double scale = (ru == RESUNIT_CENTIMETER) ? 2.54 : 1.0;
+        m->have_dpi = 1;
+        m->dpi_x = xr * scale;
+        m->dpi_y = yr * scale;
+    }
+
+    /* ICC and XMP are ordinary TIFF tags */
+    uint32_t taglen = 0;
+    void *tagdata = NULL;
+    if (TIFFGetField(tif, TIFFTAG_ICCPROFILE, &taglen, &tagdata) == 1 &&
+        taglen && tagdata)
+        img_meta_set_blob(&m->icc, &m->icc_len, tagdata, taglen);
+    if (TIFFGetField(tif, TIFFTAG_XMLPACKET, &taglen, &tagdata) == 1 &&
+        taglen && tagdata)
+        img_meta_set_blob((uint8_t **)&m->xmp, &m->xmp_len, tagdata, taglen);
+
+    static const struct { unsigned exif_tag, tiff_tag; } ascii[] = {
+        { 270,   TIFFTAG_IMAGEDESCRIPTION },
+        { 271,   TIFFTAG_MAKE },
+        { 272,   TIFFTAG_MODEL },
+        { 305,   TIFFTAG_SOFTWARE },
+        { 306,   TIFFTAG_DATETIME },
+        { 315,   TIFFTAG_ARTIST },
+        { 33432, TIFFTAG_COPYRIGHT },
+    };
+
+    eb_ent_t ent[EXIF_MAX_ENT];
+    int n = 0;
+    memset(ent, 0, sizeof(ent));
+
+    for (size_t i = 0; i < sizeof(ascii) / sizeof(ascii[0]); i++) {
+        char *s = NULL;
+        if (TIFFGetField(tif, ascii[i].tiff_tag, &s) == 1 && s && *s)
+            ent_add(ent, &n, ascii[i].exif_tag, 2, (unsigned)strlen(s) + 1,
+                    s, strlen(s) + 1);
+    }
+    {
+        uint16_t o = 0;
+        if (TIFFGetField(tif, TIFFTAG_ORIENTATION, &o) == 1 && o) {
+            uint8_t v[2] = { (uint8_t)o, (uint8_t)(o >> 8) };
+            ent_add(ent, &n, 274, 3, 1, v, 2);
+        }
+    }
+    if (have_x && have_y && xr > 0 && yr > 0) {
+        uint8_t v[2] = { (uint8_t)ru, (uint8_t)(ru >> 8) };
+        uint8_t rx[8], ry[8];
+        rational_le(xr, rx);
+        rational_le(yr, ry);
+        ent_add(ent, &n, 296, 3, 1, v, 2);
+        ent_add(ent, &n, 282, 5, 1, rx, 8);
+        ent_add(ent, &n, 283, 5, 1, ry, 8);
+    }
+
+    if (n > 0) {
+        size_t elen = 0;
+        uint8_t *blob = exif_build(ent, n, &elen);
+        if (blob && elen) {
+            m->exif = blob;
+            m->exif_len = elen;
+        } else {
+            free(blob);
+        }
+    }
+    for (int i = 0; i < n; i++)
+        free(ent[i].data);
+}
+
 int tiff_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
 {
     int fd = fileno(f);
@@ -244,6 +454,7 @@ int tiff_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
         return fail(err, errlen, "tiff: not a readable TIFF");
 
     memset(img, 0, sizeof(*img));
+    tiff_meta(tif, &img->meta);
 
     /* try the bit-depth-matched path first */
     int rc = tiff_decode_matched(tif, img, err, errlen);
@@ -262,6 +473,9 @@ int tiff_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
         return fail(err, errlen, "tiff: bad dimensions");
     }
 
+    /* keep the metadata across the reset below */
+    img_meta_t keep = img->meta;
+    memset(&img->meta, 0, sizeof(img->meta));
     img_free(img);
     uint32_t *raster = (uint32_t *)_TIFFmalloc((size_t)w * h * sizeof(uint32_t));
     if (!raster) {
@@ -276,6 +490,7 @@ int tiff_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
     TIFFClose(tif);
 
     memset(img, 0, sizeof(*img));
+    img->meta = keep;
     img->width = (int)w;
     img->height = (int)h;
     img->bit_depth = 8;

@@ -19,6 +19,47 @@ typedef enum {
     IMG_RGBA         /* 8/16-bit, 4 channels                 */
 } img_color_t;
 
+/* ---------------------------------------------------------------------------
+ * Metadata
+ *
+ * Sources carry their EXIF / ICC / XMP / text / resolution data in different
+ * containers; all of it is normalised into this struct so the PNG encoder can
+ * write it back out as eXIf / iCCP / iTXt / tEXt / pHYs.  Pointers are owned
+ * by the struct; zeroing it (memset) yields "no metadata".
+ * ------------------------------------------------------------------------ */
+
+/* Which PNG text chunk the value came from, so it is written back the same
+ * way (an iTXt carrying non-Latin-1 text must not become a tEXt). */
+typedef enum {
+    IMG_TEXT_TEXT   = 0,    /* tEXt   - Latin-1, uncompressed        */
+    IMG_TEXT_ZTXT   = 1,    /* zTXt   - Latin-1, deflate-compressed  */
+    IMG_TEXT_ITXT   = 2,    /* iTXt   - UTF-8, uncompressed          */
+    IMG_TEXT_ITXT_Z = 3     /* iTXt   - UTF-8, deflate-compressed    */
+} img_text_kind_t;
+
+typedef struct {
+    char *key;              /* 1-79 bytes, no leading/trailing/adjacent space */
+    char *value;            /* UTF-8 */
+    int   kind;             /* img_text_kind_t */
+} img_text_t;
+
+typedef struct img_meta {
+    int      have_dpi;
+    double   dpi_x, dpi_y;      /* dots per inch */
+
+    uint8_t *exif;              /* TIFF-format EXIF payload, no "Exif\0\0" */
+    size_t   exif_len;
+
+    uint8_t *icc;               /* ICC profile, uncompressed */
+    size_t   icc_len;
+
+    char    *xmp;               /* XMP packet (UTF-8 XML), NUL-terminated */
+    size_t   xmp_len;
+
+    img_text_t *text;           /* text chunks kept from a PNG source */
+    int         ntext;
+} img_meta_t;
+
 typedef struct {
     int width;
     int height;
@@ -40,7 +81,33 @@ typedef struct {
     /* GRAY only: optional single transparent-gray value (tRNS) */
     int      has_gray_trns;
     uint16_t gray_trns_value;   /* sample value at source depth */
+
+    /* everything that is not pixel data */
+    img_meta_t meta;
 } img_image_t;
+
+void img_meta_free(img_meta_t *m);
+
+/* Copy a blob into the metadata (replacing any previous value).  Returns 0 on
+ * success, -1 on out-of-memory (the metadata is left unchanged). */
+int img_meta_set_blob(uint8_t **dst, size_t *dstlen, const void *src, size_t len);
+
+/* Store EXIF, stripping a "Exif\0\0" identifier and/or a leading 4-byte
+ * offset (HEIF/AVIF wrap it that way) and validating the TIFF header.
+ * Returns 1 if usable EXIF was stored, 0 if the payload was not EXIF. */
+int img_meta_set_exif(img_meta_t *m, const void *src, size_t len);
+
+/* Read the resolution out of a TIFF-format EXIF payload.  unit: 2 = inch,
+ * 3 = cm.  Returns 1 when both values were found. */
+int img_exif_resolution(const uint8_t *exif, size_t len,
+                        double *x, double *y, int *unit);
+
+/* Read the Orientation tag (1 = normal) out of an EXIF payload; 0 if absent. */
+int img_exif_orientation(const uint8_t *exif, size_t len);
+
+/* Append a text key/value pair (used by the PNG reader).  Returns 0/-1. */
+int img_meta_add_text(img_meta_t *m, const char *key, const char *value,
+                      int kind);
 
 /* Bytes per output row for the given geometry. */
 size_t img_rowstride(int width, int bit_depth, int channels);

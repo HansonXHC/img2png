@@ -19,6 +19,7 @@
 #include <gif_lib.h>
 #include <qoi.h>
 #include <webp/encode.h>
+#include <jpeglib.h>
 #include <tiffio.h>
 #include "enc/apngenc.h"
 
@@ -677,6 +678,300 @@ static int gen_pbm(const char *path, int w, int h, int ascii)
     if (ascii && ok)
         ok = fputc('\n', f) != EOF;
     fclose(f);
+    return ok ? 0 : -1;
+}
+
+/* ---------------------------------------------------------------------------
+ * Metadata test helpers
+ * ------------------------------------------------------------------------ */
+
+/* A minimal but valid EXIF payload: TIFF header + IFD0 carrying Make,
+ * X/YResolution (300 dpi) and ResolutionUnit. */
+static size_t make_exif(uint8_t *buf, size_t cap)
+{
+    static const char make[] = "TESTCAM";
+    const unsigned nent = 4;
+    size_t make_off = 8 + 2 + nent * 12 + 4;
+    size_t res_off = make_off + sizeof(make);
+    size_t need = res_off + 16;
+    if (need > cap)
+        return 0;
+    memset(buf, 0, need);
+    buf[0] = 'I'; buf[1] = 'I'; buf[2] = 42; buf[3] = 0;
+#define W16(o, v) do { buf[o] = (uint8_t)(v); buf[o + 1] = (uint8_t)((v) >> 8); } while (0)
+#define W32(o, v) do { buf[o] = (uint8_t)(v); buf[o + 1] = (uint8_t)((v) >> 8); \
+                       buf[o + 2] = (uint8_t)((v) >> 16); buf[o + 3] = (uint8_t)((v) >> 24); } while (0)
+    W32(4, 8);
+    W16(8, nent);
+    size_t e = 10;
+    W16(e, 271); W16(e + 2, 2); W32(e + 4, (unsigned)sizeof(make));
+    W32(e + 8, (unsigned)make_off); e += 12;
+    W16(e, 282); W16(e + 2, 5); W32(e + 4, 1); W32(e + 8, (unsigned)res_off); e += 12;
+    W16(e, 283); W16(e + 2, 5); W32(e + 4, 1); W32(e + 8, (unsigned)(res_off + 8)); e += 12;
+    W16(e, 296); W16(e + 2, 3); W32(e + 4, 1); W16(e + 8, 2); e += 12;
+    W32(e, 0);
+    memcpy(buf + make_off, make, sizeof(make));
+    W32(res_off, 300); W32(res_off + 4, 1);
+    W32(res_off + 8, 300); W32(res_off + 12, 1);
+#undef W16
+#undef W32
+    return need;
+}
+
+/* A valid ICC profile that libpng's iCCP validation accepts: the mandatory
+ * length / 'acsp' signature / 'RGB ' colour space header fields, no tags, and
+ * an incompressible body.  The body matters - libpng's iCCP reader rejects a
+ * chunk shorter than 92 bytes outright ("too short"), so a tiny degenerate
+ * profile would never round-trip.  `tag4` just identifies the profile. */
+#define TEST_ICC_SIZE 2048
+
+static void make_icc(uint8_t *icc, size_t len, const char *tag4)
+{
+    memset(icc, 0, len);
+    icc[0] = 0; icc[1] = 0;
+    icc[2] = (uint8_t)(len >> 8); icc[3] = (uint8_t)len;
+    icc[8] = 2;                                     /* version major */
+    memcpy(icc + 12, "mntr", 4);                    /* display device class */
+    memcpy(icc + 16, "RGB ", 4);                    /* data colour space */
+    memcpy(icc + 20, "XYZ ", 4);                    /* PCS */
+    memcpy(icc + 36, "acsp", 4);                    /* signature */
+    icc[68] = 0x00; icc[69] = 0x00; icc[70] = 0xF6; icc[71] = 0xD6;
+    icc[72] = 0x00; icc[73] = 0x01; icc[74] = 0x00; icc[75] = 0x00;
+    icc[76] = 0x00; icc[77] = 0x00; icc[78] = 0xD3; icc[79] = 0x2D;  /* D50 */
+    /* tag count at 128 stays 0; fill the rest so it cannot compress away */
+    unsigned x = 12345;
+    for (size_t i = 132; i < len; i++) {
+        x = x * 1103515245u + 12345u;
+        icc[i] = (uint8_t)(x >> 16);
+    }
+    if (tag4)
+        memcpy(icc + 4, tag4, 4);
+}
+
+/* substring search over binary data (EXIF payloads are full of NULs) */
+static int contains_bytes(const uint8_t *hay, size_t hlen, const char *needle)
+{
+    size_t nl = strlen(needle);
+    if (!nl || nl > hlen)
+        return 0;
+    for (size_t i = 0; i + nl <= hlen; i++)
+        if (!memcmp(hay + i, needle, nl))
+            return 1;
+    return 0;
+}
+
+/* what a PNG file carries besides pixels */
+typedef struct {
+    int      have_phys;
+    unsigned ppm_x, ppm_y;
+    size_t   exif_len;
+    size_t   icc_len;
+    int      ntext;
+    char     keys[8][40];
+} png_meta_t;
+
+static int read_png_meta(const char *path, png_meta_t *out)
+{
+    memset(out, 0, sizeof(*out));
+    FILE *f = img_fopen_read(path);
+    if (!f)
+        return -1;
+    png_err_t pe;
+    png_structp png = png_create_read_struct(PNG_LIBPNG_VER_STRING, &pe,
+                                             pngerr_error, pngerr_warn);
+    png_infop info = png ? png_create_info_struct(png) : NULL;
+    if (!png || !info) { if (f) fclose(f); return -1; }
+    if (setjmp(pe.jb)) {
+        png_destroy_read_struct(&png, &info, NULL);
+        fclose(f);
+        return -1;
+    }
+    png_init_io(png, f);
+    png_read_info(png, info);
+
+    png_uint_32 px = 0, py = 0;
+    int unit = 0;
+    if (png_get_pHYs(png, info, &px, &py, &unit) &&
+        unit == PNG_RESOLUTION_METER) {
+        out->have_phys = 1;
+        out->ppm_x = px;
+        out->ppm_y = py;
+    }
+    png_bytep ex = NULL;
+    png_uint_32 exl = 0;
+    if (png_get_eXIf_1(png, info, &exl, &ex) && ex && exl)
+        out->exif_len = exl;
+    png_charp nm = NULL;
+    png_bytep icc = NULL;
+    png_uint_32 iccl = 0;
+    int comp = 0;
+    if (png_get_iCCP(png, info, &nm, &comp, &icc, &iccl) && icc)
+        out->icc_len = iccl;
+    png_textp t = NULL;
+    int nt = 0;
+    if (png_get_text(png, info, &t, &nt) > 0) {
+        for (int i = 0; i < nt && out->ntext < 8; i++) {
+            if (!t[i].key)
+                continue;
+            snprintf(out->keys[out->ntext], sizeof(out->keys[0]), "%s", t[i].key);
+            out->ntext++;
+        }
+    }
+    png_destroy_read_struct(&png, &info, NULL);
+    fclose(f);
+    return 0;
+}
+
+static int meta_has_key(const png_meta_t *m, const char *key)
+{
+    for (int i = 0; i < m->ntext; i++)
+        if (!strcmp(m->keys[i], key))
+            return 1;
+    return 0;
+}
+
+/* A small JPEG carrying JFIF density, EXIF, a two-part ICC profile, XMP and a
+ * comment - everything the decoder is expected to pick up. */
+static int gen_jpeg_meta(const char *path, const uint8_t *exif, size_t exif_len,
+                         const uint8_t *icc, size_t icc_len, const char *xmp)
+{
+    FILE *f = img_fopen_write(path);
+    if (!f)
+        return -1;
+    struct jpeg_compress_struct cinfo;
+    struct jpeg_error_mgr jerr;
+    cinfo.err = jpeg_std_error(&jerr);
+    jpeg_create_compress(&cinfo);
+    jpeg_stdio_dest(&cinfo, f);
+    cinfo.image_width = 8;
+    cinfo.image_height = 8;
+    cinfo.input_components = 3;
+    cinfo.in_color_space = JCS_RGB;
+    jpeg_set_defaults(&cinfo);
+    jpeg_set_quality(&cinfo, 90, TRUE);
+    cinfo.density_unit = 1;         /* dots per inch */
+    cinfo.X_density = 300;          /* libjpeg writes these into the JFIF APP0 */
+    cinfo.Y_density = 300;
+    jpeg_start_compress(&cinfo, TRUE);
+
+    if (exif && exif_len) {
+        uint8_t *b = (uint8_t *)malloc(exif_len + 6);
+        memcpy(b, "Exif\0\0", 6);
+        memcpy(b + 6, exif, exif_len);
+        jpeg_write_marker(&cinfo, JPEG_APP0 + 1, b, (unsigned)(exif_len + 6));
+        free(b);
+    }
+    if (icc && icc_len) {           /* split in two to exercise reassembly */
+        size_t half = icc_len / 2;
+        for (int part = 0; part < 2; part++) {
+            size_t off = part ? half : 0;
+            size_t len = part ? icc_len - half : half;
+            uint8_t *b = (uint8_t *)malloc(14 + len);
+            memcpy(b, "ICC_PROFILE\0", 12);
+            b[12] = (uint8_t)(part + 1);
+            b[13] = 2;
+            memcpy(b + 14, icc + off, len);
+            jpeg_write_marker(&cinfo, JPEG_APP0 + 2, b, (unsigned)(14 + len));
+            free(b);
+        }
+    }
+    if (xmp) {
+        static const char hdr[] = "http://ns.adobe.com/xap/1.0/";
+        size_t hl = sizeof(hdr);
+        size_t xl = strlen(xmp);
+        uint8_t *b = (uint8_t *)malloc(hl + xl);
+        memcpy(b, hdr, hl);
+        memcpy(b + hl, xmp, xl);
+        jpeg_write_marker(&cinfo, JPEG_APP0 + 1, b, (unsigned)(hl + xl));
+        free(b);
+    }
+    jpeg_write_marker(&cinfo, JPEG_COM, (const JOCTET *)"hello comment", 13);
+
+    uint8_t row[8 * 3];
+    while (cinfo.next_scanline < cinfo.image_height) {
+        for (int x = 0; x < 8; x++) {
+            row[x * 3 + 0] = (uint8_t)(x * 30);
+            row[x * 3 + 1] = (uint8_t)(cinfo.next_scanline * 30);
+            row[x * 3 + 2] = 90;
+        }
+        JSAMPROW rp = row;
+        jpeg_write_scanlines(&cinfo, &rp, 1);
+    }
+    jpeg_finish_compress(&cinfo);
+    jpeg_destroy_compress(&cinfo);
+    fclose(f);
+    return 0;
+}
+
+/* Wrap an encoded VP8L bitstream in a container that also holds ICC/EXIF/XMP,
+ * which is how WebP carries metadata. */
+static int gen_webp_meta(const char *path, const uint8_t *icc, size_t icc_len,
+                         const uint8_t *exif, size_t exif_len, const char *xmp)
+{
+    int w = 0, h = 0;
+    uint8_t src[8 * 8 * 3];
+    for (int i = 0; i < 8 * 8; i++) {
+        src[i * 3 + 0] = (uint8_t)(i * 3);
+        src[i * 3 + 1] = (uint8_t)(i * 5);
+        src[i * 3 + 2] = 7;
+    }
+    uint8_t *vp8l = NULL;
+    size_t vp8l_total = WebPEncodeLosslessRGB(src, 8, 8, 8 * 3, &vp8l);
+    /* WebPEncodeLosslessRGB returns a whole RIFF file: keep just the VP8L
+     * chunk payload (12 byte RIFF/WEBP header + 8 byte chunk header) */
+    if (!vp8l || vp8l_total < 21)
+        return -1;
+    size_t vp8l_len = vp8l_total - 20;
+    /* re-read the canvas size from the VP8L header (14 bits each, +1) */
+    const uint8_t *vh = vp8l + 20;
+    unsigned bits = (unsigned)vh[1] | ((unsigned)vh[2] << 8) |
+                    ((unsigned)vh[3] << 16) | ((unsigned)vh[4] << 24);
+    w = (int)(bits & 0x3FFF) + 1;
+    h = (int)((bits >> 14) & 0x3FFF) + 1;
+
+    size_t xmp_len = xmp ? strlen(xmp) : 0;
+    /* VP8X payload: flags, reserved, canvas size, each chunk padded to even */
+    size_t body = 8 + 10;                                   /* VP8X */
+    if (icc_len) body += 8 + icc_len + (icc_len & 1);
+    if (exif_len) body += 8 + exif_len + (exif_len & 1);
+    if (xmp_len) body += 8 + xmp_len + (xmp_len & 1);
+    body += 8 + vp8l_len + (vp8l_len & 1);
+
+    uint8_t *out = (uint8_t *)calloc(1, body + 12);
+    if (!out) { WebPFree(vp8l); return -1; }
+    uint8_t *p = out;
+    memcpy(p, "RIFF", 4);
+    uint32_t riff = (uint32_t)(body + 4);
+    memcpy(p + 4, &riff, 4);
+    memcpy(p + 8, "WEBP", 4);
+    p += 12;
+    memcpy(p, "VP8X", 4);
+    uint32_t ten = 10;
+    memcpy(p + 4, &ten, 4);
+    p[8] = (uint8_t)((icc_len ? 0x20 : 0) | (exif_len ? 0x08 : 0) |
+                     (xmp_len ? 0x04 : 0));
+    uint32_t cw = (uint32_t)(w - 1) | ((uint32_t)(h - 1) << 24);
+    memcpy(p + 12, &cw, 4);
+    p += 18;
+#define PUT_CHUNK(id, data, len)                                              \
+    do {                                                                      \
+        memcpy(p, id, 4);                                                      \
+        uint32_t l_ = (uint32_t)(len);                                         \
+        memcpy(p + 4, &l_, 4);                                                 \
+        if (len) memcpy(p + 8, data, len);                                      \
+        p += 8 + (len) + ((len) & 1);                                          \
+    } while (0)
+    if (icc_len)  PUT_CHUNK("ICCP", icc, icc_len);
+    if (exif_len) PUT_CHUNK("EXIF", exif, exif_len);
+    if (xmp_len)  PUT_CHUNK("XMP ", xmp, xmp_len);
+    PUT_CHUNK("VP8L", vp8l + 20, vp8l_len);
+#undef PUT_CHUNK
+
+    FILE *f = img_fopen_write(path);
+    int ok = f && fwrite(out, 1, body + 12, f) == body + 12;
+    if (f) fclose(f);
+    free(out);
+    WebPFree(vp8l);
     return ok ? 0 : -1;
 }
 
@@ -2057,6 +2352,251 @@ pgm_done:;
                       get_sample(&rt, 1, 0, 3) == 255,
                       "tRNS colour becomes transparent");
                 img_free(&rt);
+            }
+        }
+    }
+
+    /* --- metadata round trips ------------------------------------------- */
+    printf("Metadata: JPEG -> PNG (EXIF, split ICC, XMP, comment, density):\n");
+    {
+        uint8_t exif[512];
+        size_t exif_len = make_exif(exif, sizeof(exif));
+        CHECK(exif_len > 0, "build EXIF payload");
+
+        uint8_t icc[TEST_ICC_SIZE];
+        make_icc(icc, sizeof(icc), "JPEG");
+
+        const char *xmp = "<x:xmpmeta>meta-test</x:xmpmeta>";
+        CHECK(gen_jpeg_meta("testout/meta.jpg", exif, exif_len,
+                            icc, sizeof(icc), xmp) == 0, "generate jpeg with markers");
+
+        FILE *f = img_fopen_read("testout/meta.jpg");
+        img_image_t img;
+        int okd = f && jpeg_decode(f, &img, err, sizeof(err)) == 0;
+        if (f) fclose(f);
+        CHECK(okd, "decode jpeg");
+        if (okd) {
+            CHECK(img.meta.have_dpi && (int)(img.meta.dpi_x + 0.5) == 300 &&
+                  (int)(img.meta.dpi_y + 0.5) == 300, "JFIF density read (300 dpi)");
+            CHECK(img.meta.exif && img.meta.exif_len == exif_len, "EXIF captured");
+            CHECK(img.meta.exif && !memcmp(img.meta.exif, exif, exif_len),
+                  "EXIF bytes intact");
+            CHECK(img.meta.icc && img.meta.icc_len == sizeof(icc),
+                  "ICC reassembled from two APP2 parts");
+            CHECK(img.meta.icc && !memcmp(img.meta.icc, icc, sizeof(icc)),
+                  "ICC bytes intact across the split");
+            CHECK(img.meta.xmp && img.meta.xmp_len == strlen(xmp) &&
+                  !memcmp(img.meta.xmp, xmp, strlen(xmp)), "XMP captured");
+            CHECK(img.meta.ntext == 1 && img.meta.text[0].key &&
+                  !strcmp(img.meta.text[0].key, "Comment"), "JPEG comment captured");
+
+            CHECK(png_write_file(&img, &opts, "testout/meta_jpg.png",
+                                 err, sizeof(err)) == 0, "encode png");
+            img_free(&img);
+
+            png_meta_t pm;
+            if (read_png_meta("testout/meta_jpg.png", &pm) == 0) {
+                CHECK(pm.have_phys && pm.ppm_x == 11811 && pm.ppm_y == 11811,
+                      "pHYs = 300 dpi (11811 px/m)");
+                CHECK(pm.exif_len == exif_len, "eXIf carried into the PNG");
+                CHECK(pm.icc_len == sizeof(icc), "iCCP carried into the PNG");
+                CHECK(meta_has_key(&pm, "XML:com.adobe.xmp"), "XMP written as iTXt");
+                CHECK(meta_has_key(&pm, "Comment"), "comment written as tEXt");
+            } else {
+                CHECK(0, "read back jpeg metadata");
+            }
+        }
+    }
+
+    printf("Metadata: PNG -> PNG (eXIf, iCCP, four text chunk kinds, pHYs):\n");
+    {
+        uint8_t exif[512];
+        size_t exif_len = make_exif(exif, sizeof(exif));
+        uint8_t icc[TEST_ICC_SIZE];
+        make_icc(icc, sizeof(icc), "PNGR");
+        const char *xmp = "<x:xmpmeta>roundtrip</x:xmpmeta>";
+
+        FILE *wf = img_fopen_write("testout/meta_in.png");
+        png_err_t pe;
+        png_structp png = wf ? png_create_write_struct(PNG_LIBPNG_VER_STRING, &pe,
+                                                       pngerr_error, pngerr_warn) : NULL;
+        png_infop info = png ? png_create_info_struct(png) : NULL;
+        int wrote = 0;
+        if (png && info && setjmp(pe.jb) == 0) {
+            png_init_io(png, wf);
+            png_set_IHDR(png, info, 4, 2, 8, PNG_COLOR_TYPE_RGB, PNG_INTERLACE_NONE,
+                         PNG_COMPRESSION_TYPE_DEFAULT, PNG_FILTER_TYPE_DEFAULT);
+            png_set_pHYs(png, info, 11811, 11811, PNG_RESOLUTION_METER);
+            png_set_eXIf_1(png, info, (png_uint_32)exif_len, (png_bytep)exif);
+            png_set_iCCP(png, info, "test profile", PNG_COMPRESSION_TYPE_BASE,
+                         (png_const_bytep)icc, (png_uint_32)sizeof(icc));
+            png_text tx[4];
+            memset(tx, 0, sizeof(tx));
+            tx[0].compression = PNG_TEXT_COMPRESSION_NONE;
+            tx[0].key = (png_charp)"Title";  tx[0].text = (png_charp)"plain text";
+            tx[1].compression = PNG_TEXT_COMPRESSION_zTXt;
+            tx[1].key = (png_charp)"Author"; tx[1].text = (png_charp)"compressed text";
+            tx[2].compression = PNG_ITXT_COMPRESSION_NONE;
+            tx[2].key = (png_charp)"Comment"; tx[2].text = (png_charp)"utf-8 text";
+            tx[2].lang = (png_charp)"en"; tx[2].lang_key = (png_charp)"";
+            tx[3].compression = PNG_ITXT_COMPRESSION_NONE;
+            tx[3].key = (png_charp)"XML:com.adobe.xmp"; tx[3].text = (png_charp)xmp;
+            tx[3].lang = (png_charp)""; tx[3].lang_key = (png_charp)"";
+            png_set_text(png, info, tx, 4);
+            png_write_info(png, info);
+            uint8_t raw[4 * 3 * 2];
+            png_bytep rows[2];
+            for (int y = 0; y < 2; y++) {
+                for (int x = 0; x < 4; x++) {
+                    raw[(y * 4 + x) * 3 + 0] = (uint8_t)(x * 40);
+                    raw[(y * 4 + x) * 3 + 1] = (uint8_t)(y * 80);
+                    raw[(y * 4 + x) * 3 + 2] = 5;
+                }
+                rows[y] = raw + y * 4 * 3;
+            }
+            png_write_image(png, rows);
+            png_write_end(png, NULL);
+            wrote = 1;
+        }
+        if (png) png_destroy_write_struct(&png, &info);
+        if (wf) fclose(wf);
+        CHECK(wrote, "write source png carrying metadata");
+
+        long n = -1;
+        uint8_t *buf = NULL;
+        FILE *f = img_fopen_read("testout/meta_in.png");
+        if (f) {
+            fseek(f, 0, SEEK_END); n = ftell(f); rewind(f);
+            buf = (uint8_t *)malloc((size_t)n);
+            if (!buf || fread(buf, 1, (size_t)n, f) != (size_t)n) { free(buf); buf = NULL; }
+            fclose(f);
+        }
+        img_image_t img;
+        int okd = buf && png_decode_mem(buf, (size_t)n, &img, err, sizeof(err)) == 0;
+        free(buf);
+        CHECK(okd, "decode png");
+        if (okd) {
+            CHECK(img.meta.have_dpi && (int)(img.meta.dpi_x + 0.5) == 300,
+                  "pHYs -> 300 dpi");
+            CHECK(img.meta.exif && img.meta.exif_len == exif_len, "eXIf read");
+            CHECK(img.meta.icc && img.meta.icc_len == sizeof(icc), "iCCP read");
+            CHECK(img.meta.xmp && img.meta.xmp_len == strlen(xmp), "XMP read");
+            CHECK(img.meta.ntext == 3, "three text chunks kept (XMP split out)");
+            int kinds_ok = 1;
+            for (int i = 0; i < img.meta.ntext; i++) {
+                const img_text_t *t = &img.meta.text[i];
+                if (!t->key) { kinds_ok = 0; continue; }
+                if (!strcmp(t->key, "Title") && t->kind != IMG_TEXT_TEXT) kinds_ok = 0;
+                if (!strcmp(t->key, "Author") && t->kind != IMG_TEXT_ZTXT) kinds_ok = 0;
+                if (!strcmp(t->key, "Comment") && t->kind != IMG_TEXT_ITXT) kinds_ok = 0;
+            }
+            CHECK(kinds_ok, "tEXt/zTXt/iTXt kinds preserved");
+
+            CHECK(png_write_file(&img, &opts, "testout/meta_out.png",
+                                 err, sizeof(err)) == 0, "re-encode png");
+            img_free(&img);
+            png_meta_t pm;
+            if (read_png_meta("testout/meta_out.png", &pm) == 0) {
+                CHECK(pm.have_phys && pm.ppm_x == 11811, "pHYs preserved");
+                CHECK(pm.exif_len == exif_len, "eXIf preserved");
+                CHECK(pm.icc_len == sizeof(icc), "iCCP preserved");
+                CHECK(pm.ntext == 4, "all four text chunks present");
+                CHECK(meta_has_key(&pm, "XML:com.adobe.xmp") &&
+                      meta_has_key(&pm, "Title") && meta_has_key(&pm, "Author") &&
+                      meta_has_key(&pm, "Comment"), "keys preserved");
+            } else {
+                CHECK(0, "read back png metadata");
+            }
+        }
+    }
+
+    printf("Metadata: TIFF -> PNG (resolution tags, ICC, XMP, EXIF rebuilt):\n");
+    {
+        uint8_t icc[TEST_ICC_SIZE];
+        make_icc(icc, sizeof(icc), "TIFF");
+        const char *xmp = "<x:xmpmeta>tiff</x:xmpmeta>";
+
+        TIFF *tf = TIFFOpen("testout/meta.tiff", "w");
+        CHECK(tf != NULL, "open tiff for writing");
+        if (tf) {
+            TIFFSetField(tf, TIFFTAG_IMAGEWIDTH, 4);
+            TIFFSetField(tf, TIFFTAG_IMAGELENGTH, 2);
+            TIFFSetField(tf, TIFFTAG_BITSPERSAMPLE, 8);
+            TIFFSetField(tf, TIFFTAG_SAMPLESPERPIXEL, 1);
+            TIFFSetField(tf, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+            TIFFSetField(tf, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            TIFFSetField(tf, TIFFTAG_XRESOLUTION, (float)300.0);
+            TIFFSetField(tf, TIFFTAG_YRESOLUTION, (float)300.0);
+            TIFFSetField(tf, TIFFTAG_RESOLUTIONUNIT, (uint16_t)RESUNIT_INCH);
+            TIFFSetField(tf, TIFFTAG_MAKE, "TESTCAM");
+            TIFFSetField(tf, TIFFTAG_MODEL, "MODEL-1");
+            TIFFSetField(tf, TIFFTAG_DATETIME, "2026:10:06 12:00:00");
+            TIFFSetField(tf, TIFFTAG_ORIENTATION, (uint16_t)1);
+            TIFFSetField(tf, TIFFTAG_ICCPROFILE, (uint32_t)sizeof(icc), icc);
+            TIFFSetField(tf, TIFFTAG_XMLPACKET, (uint32_t)strlen(xmp), (void *)xmp);
+            uint8_t rows[2][4] = { { 1, 2, 3, 4 }, { 5, 6, 7, 8 } };
+            int wok = 1;
+            for (int y = 0; y < 2 && wok; y++)
+                wok = TIFFWriteScanline(tf, rows[y], (uint32_t)y, 0) >= 0;
+            CHECK(wok, "write tiff with metadata tags");
+            TIFFClose(tf);
+        }
+        FILE *f = img_fopen_read("testout/meta.tiff");
+        img_image_t img;
+        int okd = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+        if (f) fclose(f);
+        CHECK(okd, "decode tiff");
+        if (okd) {
+            CHECK(img.meta.have_dpi && (int)(img.meta.dpi_x + 0.5) == 300,
+                  "resolution tags -> 300 dpi");
+            CHECK(img.meta.icc && img.meta.icc_len == sizeof(icc), "ICCPROFILE tag read");
+            CHECK(img.meta.xmp && img.meta.xmp_len == strlen(xmp), "XMLPACKET tag read");
+            CHECK(img.meta.exif && img.meta.exif_len > 0, "EXIF rebuilt from IFD0");
+            double rx = 0, ry = 0;
+            int unit = 0;
+            CHECK(img.meta.exif &&
+                  img_exif_resolution(img.meta.exif, img.meta.exif_len, &rx, &ry, &unit) &&
+                  (int)(rx + 0.5) == 300 && unit == 2,
+                  "rebuilt EXIF carries the resolution");
+            CHECK(img.meta.exif &&
+                  contains_bytes(img.meta.exif, img.meta.exif_len, "TESTCAM") &&
+                  contains_bytes(img.meta.exif, img.meta.exif_len, "MODEL-1") &&
+                  contains_bytes(img.meta.exif, img.meta.exif_len, "2026:10:06 12:00:00"),
+                  "rebuilt EXIF carries Make/Model/DateTime");
+            img_free(&img);
+        }
+    }
+
+    printf("Metadata: WebP -> PNG (ICCP / EXIF / XMP chunks):\n");
+    {
+        uint8_t exif[512];
+        size_t exif_len = make_exif(exif, sizeof(exif));
+        uint8_t icc[TEST_ICC_SIZE];
+        make_icc(icc, sizeof(icc), "WEBP");
+        const char *xmp = "<x:xmpmeta>webp</x:xmpmeta>";
+
+        CHECK(gen_webp_meta("testout/meta.webp", icc, sizeof(icc),
+                            exif, exif_len, xmp) == 0,
+              "generate webp with metadata chunks");
+        FILE *f = img_fopen_read("testout/meta.webp");
+        img_image_t img;
+        int okd = f && webp_decode(f, &img, err, sizeof(err)) == 0;
+        if (f) fclose(f);
+        CHECK(okd, "decode webp");
+        if (okd) {
+            CHECK(img.meta.exif && img.meta.exif_len == exif_len, "EXIF chunk read");
+            CHECK(img.meta.icc && img.meta.icc_len == sizeof(icc), "ICCP chunk read");
+            CHECK(img.meta.xmp && img.meta.xmp_len == strlen(xmp), "XMP chunk read");
+            CHECK(png_write_file(&img, &opts, "testout/meta_webp.png",
+                                 err, sizeof(err)) == 0, "encode png");
+            img_free(&img);
+            png_meta_t pm;
+            if (read_png_meta("testout/meta_webp.png", &pm) == 0) {
+                CHECK(pm.exif_len == exif_len && pm.icc_len == sizeof(icc) &&
+                      meta_has_key(&pm, "XML:com.adobe.xmp"),
+                      "all three carried into the PNG");
+            } else {
+                CHECK(0, "read back webp metadata");
             }
         }
     }

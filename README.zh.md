@@ -9,6 +9,7 @@ QOI / WebP / TIFF / HEIF / AVIF** 输入，输出无损 PNG；输入是动图 GI
 
 - [特性](#特性)
 - [支持的输入格式](#支持的输入格式)
+- [元数据](#元数据)
 - [构建](#构建)
 - [CLI 用法](#cli-用法)
 - [GUI 用法](#gui-用法)
@@ -26,6 +27,7 @@ QOI / WebP / TIFF / HEIF / AVIF** 输入，输出无损 PNG；输入是动图 GI
   语义完整保留
 - **PNG 重编码**：PNG 输入按当前设置重新压缩，像素不变，适合给其他工具压过的 PNG"再压一遍"
 - **始终无损**：压缩级别与滤镜只影响文件大小和速度
+- **元数据保留**：EXIF、ICC 色彩配置、XMP、分辨率与 PNG 文本块随图一起带过去，不再丢失（见[元数据](#元数据)）
 
 **输出控制**
 
@@ -74,6 +76,37 @@ QOI / WebP / TIFF / HEIF / AVIF** 输入，输出无损 PNG；输入是动图 GI
 
 无法用 PNG 表达的源位深会明确报错，而不是静默转换：**16 位 BMP**、**TGA 15/16 位真彩**、
 **ICO 16 位条目**。
+
+## 元数据
+
+除像素之外的其它信息也一并带过去 —— 相机参数、色彩配置、分辨率不再被静默丢弃。
+
+| 源格式 | EXIF | ICC 色彩配置 | XMP | 分辨率 | 文本 |
+|---|---|---|---|---|---|
+| JPEG | `APP1` | `APP2`（多段配置自动重组） | `APP1` | JFIF 头，无则取 EXIF | `COM` 注释 |
+| PNG | `eXIf` | `iCCP` | `iTXt` | `pHYs` | `tEXt` / `zTXt` / `iTXt` |
+| TIFF | 由 IFD0 标签重建 | `ICCPROFILE` 标签 | `XMLPACKET` 标签 | 分辨率标签 | — |
+| WebP | `EXIF` 块 | `ICCP` 块 | `XMP` 块 | — | — |
+| HEIF | `Exif` 元数据块 | libheif 未提供接口 | XMP 元数据块 | — | — |
+| AVIF | `exif` 项 | `icc` 项 | `xmp` 项 | — | — |
+| BMP / TGA / PNM / ICO / QOI / GIF | 这些格式本身不含 EXIF / ICC / XMP | | | — | — |
+
+输出 PNG 会写入 `pHYs`（分辨率）、`eXIf`（EXIF）、`iCCP`（ICC）、关键字为 `XML:com.adobe.xmp`
+的 `iTXt`（XMP），以及源 PNG 原有的文本块。元数据保留与 `--auto` 优化正交，不会被它丢掉。
+
+需要注意的边界：
+
+- **EXIF 原样透传**（JPEG / PNG / WebP / HEIF / AVIF），所以不会丢任何内容 —— 包括 Exif 子 IFD
+  里的曝光时间、光圈、ISO 等。TIFF 则是用 IFD0 中与 EXIF 对应的标签（Make / Model /
+  Orientation / DateTime / Software / Artist / Copyright / 分辨率）重建一份，TIFF 的 Exif 子 IFD
+  不重建。
+- **方向标记**按标签带过去，像素不做旋转 —— 与 JPEG 查看器对源文件的处理一致。
+- **HEIF**：libheif 的公开 API 没有 ICC 访问接口，所以 HEIC 的色彩配置不保留。
+- **libpng 的一个行为**：读取时长度不足 92 字节的 `iCCP` 块会被判为 "too short" 丢弃，因此
+  极端小的压缩配置可能丢失（真实配置远大于此）。
+- 某些手机 JPEG 里的私有 `APP6`–`APP10` 厂商块（如 HONOR 文件里约 260 KB）在标准 PNG 中没有
+  对应位置，不保留。
+- 很多查看器会忽略 `eXIf`，因此 PNG 里虽然带着 EXIF，也未必每个"图片信息"面板都会显示。
 
 ## 构建
 

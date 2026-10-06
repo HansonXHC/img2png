@@ -45,6 +45,96 @@ static int map_filter(png_filter_mode_t f)
     }
 }
 
+/* png_set_text() aborts the write on a malformed keyword, so pre-screen the
+ * ones that come from the source file.  PNG keywords are printable Latin-1
+ * (32-126 and 161-255), 1-79 bytes, no leading/trailing/doubled spaces. */
+static int text_key_ok(const char *k)
+{
+    size_t n = strlen(k);
+    if (n < 1 || n > 79)
+        return 0;
+    if (k[0] == ' ' || k[n - 1] == ' ')
+        return 0;
+    for (size_t i = 0; i + 1 < n; i++)
+        if (k[i] == ' ' && k[i + 1] == ' ')
+            return 0;
+    for (size_t i = 0; i < n; i++) {
+        unsigned char c = (unsigned char)k[i];
+        if (c < 32 || c == 127 || (c > 126 && c < 161))
+            return 0;
+    }
+    return 1;
+}
+
+/* Write the metadata collected by the decoder: pHYs, eXIf, iCCP, XMP and any
+ * text chunks carried over from a PNG source.  All of these must be set before
+ * png_write_info(). */
+static void write_metadata(png_structp png, png_infop info,
+                           const img_image_t *img)
+{
+    const img_meta_t *m = &img->meta;
+
+    if (m->have_dpi && m->dpi_x > 0 && m->dpi_y > 0) {
+        /* PNG stores integer pixels per metre */
+        png_uint_32 rx = (png_uint_32)(m->dpi_x * 39.3700787401575 + 0.5);
+        png_uint_32 ry = (png_uint_32)(m->dpi_y * 39.3700787401575 + 0.5);
+        if (rx && ry)
+            png_set_pHYs(png, info, rx, ry, PNG_RESOLUTION_METER);
+    }
+
+    if (m->exif && m->exif_len >= 8 &&
+        ((m->exif[0] == 'I' && m->exif[1] == 'I') ||
+         (m->exif[0] == 'M' && m->exif[1] == 'M')))
+        png_set_eXIf_1(png, info, (png_uint_32)m->exif_len,
+                       (png_bytep)m->exif);
+
+    if (m->icc && m->icc_len)
+        png_set_iCCP(png, info, "ICC profile", PNG_COMPRESSION_TYPE_BASE,
+                     (png_const_bytep)m->icc, (png_uint_32)m->icc_len);
+
+    int slots = m->ntext + (m->xmp ? 1 : 0);
+    if (slots <= 0)
+        return;
+
+    png_text *txt = (png_text *)calloc((size_t)slots, sizeof(*txt));
+    if (!txt)
+        return;
+    int n = 0;
+    if (m->xmp) {
+        txt[n].compression = PNG_ITXT_COMPRESSION_NONE;
+        txt[n].key = (png_charp)"XML:com.adobe.xmp";
+        txt[n].text = (png_charp)m->xmp;
+        txt[n].itxt_length = m->xmp_len;
+        txt[n].lang = (png_charp)"";
+        txt[n].lang_key = (png_charp)"";
+        n++;
+    }
+    for (int i = 0; i < m->ntext; i++) {
+        const img_text_t *t = &m->text[i];
+        if (!t->key || !t->value || !text_key_ok(t->key))
+            continue;
+        int itxt = (t->kind == IMG_TEXT_ITXT || t->kind == IMG_TEXT_ITXT_Z);
+        int zlib = (t->kind == IMG_TEXT_ZTXT || t->kind == IMG_TEXT_ITXT_Z);
+        if (itxt) {
+            txt[n].compression = zlib ? PNG_ITXT_COMPRESSION_zTXt
+                                      : PNG_ITXT_COMPRESSION_NONE;
+            txt[n].itxt_length = strlen(t->value);
+            txt[n].lang = (png_charp)"";
+            txt[n].lang_key = (png_charp)"";
+        } else {
+            txt[n].compression = zlib ? PNG_TEXT_COMPRESSION_zTXt
+                                      : PNG_TEXT_COMPRESSION_NONE;
+            txt[n].text_length = strlen(t->value);
+        }
+        txt[n].key = (png_charp)t->key;
+        txt[n].text = (png_charp)t->value;
+        n++;
+    }
+    if (n > 0)
+        png_set_text(png, info, txt, n);   /* libpng copies strings */
+    free(txt);
+}
+
 int png_write_file(const img_image_t *img, const png_opts_t *opts,
                    const char *path, char *err, size_t errlen)
 {
@@ -115,6 +205,8 @@ int png_write_file(const img_image_t *img, const png_opts_t *opts,
         v.gray = img->gray_trns_value;
         png_set_tRNS(png, info, NULL, 0, &v);
     }
+
+    write_metadata(png, info, img);
 
     png_write_info(png, info);
 

@@ -10,6 +10,7 @@ JPEG / PNG / GIF / QOI / WebP / TIFF / HEIF / AVIF**, writes lossless PNG — or
 
 - [Features](#features)
 - [Supported input formats](#supported-input-formats)
+- [Metadata](#metadata)
 - [Building](#building)
 - [CLI usage](#cli-usage)
 - [GUI usage](#gui-usage)
@@ -29,6 +30,8 @@ JPEG / PNG / GIF / QOI / WebP / TIFF / HEIF / AVIF**, writes lossless PNG — or
 - **PNG re-encoding**: PNG inputs are re-encoded with the current settings — pixels
   unchanged, handy for squeezing PNGs produced by other tools
 - **Always lossless**: compression level and filters only affect size and speed
+- **Metadata preserved**: EXIF, ICC profile, XMP, resolution and PNG text chunks travel with the
+  image instead of being dropped (see [Metadata](#metadata))
 
 **Output control**
 
@@ -81,6 +84,42 @@ and collapses pure-grayscale RGB to GRAY.
 
 Source depths that cannot be represented are reported as an error rather than silently
 converted: **16-bit BMP**, **15/16-bit truecolor TGA** and **16-bit ICO entries**.
+
+## Metadata
+
+Everything that is not pixel data is carried across too — camera settings, colour profiles and
+resolution are preserved rather than silently dropped.
+
+| Source | EXIF | ICC profile | XMP | Resolution | Text |
+|---|---|---|---|---|---|
+| JPEG | `APP1` | `APP2` (multi-segment profiles reassembled) | `APP1` | JFIF header, else EXIF | `COM` comments |
+| PNG | `eXIf` | `iCCP` | `iTXt` | `pHYs` | `tEXt` / `zTXt` / `iTXt` |
+| TIFF | rebuilt from the IFD0 tags | `ICCPROFILE` tag | `XMLPACKET` tag | resolution tags | — |
+| WebP | `EXIF` chunk | `ICCP` chunk | `XMP` chunk | — | — |
+| HEIF | `Exif` metadata block | not exposed by libheif | XMP metadata block | — | — |
+| AVIF | `exif` item | `icc` item | `xmp` item | — | — |
+| BMP / TGA / PNM / ICO / QOI / GIF | these formats carry no EXIF / ICC / XMP | | | — | — |
+
+The PNG written contains `pHYs` (resolution), `eXIf` (EXIF), `iCCP` (ICC), an `iTXt` chunk with the
+`XML:com.adobe.xmp` keyword (XMP), and any text chunks a PNG source had.  Metadata preservation is
+independent of `--auto`: the pixel optimizations never drop it.
+
+Limits worth knowing:
+
+- **EXIF is passed through verbatim** for JPEG / PNG / WebP / HEIF / AVIF, so nothing is lost —
+  including the Exif sub-IFD (exposure time, F-number, ISO, ...).  For TIFF the payload is rebuilt
+  from the IFD0 tags that map onto EXIF (Make, Model, Orientation, DateTime, Software, Artist,
+  Copyright, resolution); TIFF's Exif sub-IFD is not rebuilt.
+- **Orientation** travels as a tag and pixels are never rotated — the same thing JPEG viewers do
+  with the source file.
+- **HEIF**: libheif's public API has no ICC accessor, so a HEIC colour profile is not carried.
+- **A libpng quirk**: an `iCCP` chunk shorter than 92 bytes is rejected on read with a "too short"
+  warning, so a pathologically small compressed profile can be dropped.  Real profiles are far
+  larger.
+- The private `APP6`–`APP10` vendor blocks that some phone JPEGs carry (e.g. ~260 KB in a HONOR
+  file) have no standard PNG equivalent and are not carried.
+- Many viewers ignore `eXIf`, so a PNG's EXIF may not appear in every "image information" panel even
+  though it is present in the file.
 
 ## Building
 

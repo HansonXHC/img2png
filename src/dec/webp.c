@@ -2,12 +2,40 @@
 #include <stdlib.h>
 #include <string.h>
 #include <webp/decode.h>
+#include <webp/demux.h>
 
 static int fail(char *err, size_t errlen, const char *msg)
 {
     if (err && errlen)
         snprintf(err, errlen, "%s", msg);
     return -1;
+}
+
+/* EXIF / ICC / XMP live in RIFF chunks next to the bitstream, so the container
+ * has to be demuxed separately from the pixel decode. */
+static void webp_meta(const uint8_t *buf, size_t size, img_meta_t *m)
+{
+    WebPData wd;
+    wd.bytes = buf;
+    wd.size = size;
+    WebPDemuxer *dm = WebPDemux(&wd);
+    if (!dm)
+        return;
+    WebPChunkIterator it;
+    if (WebPDemuxGetChunk(dm, "EXIF", 1, &it)) {
+        img_meta_set_exif(m, it.chunk.bytes, it.chunk.size);
+        WebPDemuxReleaseChunkIterator(&it);
+    }
+    if (WebPDemuxGetChunk(dm, "ICCP", 1, &it)) {
+        img_meta_set_blob(&m->icc, &m->icc_len, it.chunk.bytes, it.chunk.size);
+        WebPDemuxReleaseChunkIterator(&it);
+    }
+    if (WebPDemuxGetChunk(dm, "XMP ", 1, &it)) {
+        img_meta_set_blob((uint8_t **)&m->xmp, &m->xmp_len,
+                          it.chunk.bytes, it.chunk.size);
+        WebPDemuxReleaseChunkIterator(&it);
+    }
+    WebPDemuxDelete(dm);
 }
 
 int webp_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
@@ -38,12 +66,15 @@ int webp_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
     uint8_t *pixels = has_alpha
         ? WebPDecodeRGBA(buf, (size_t)fsize, &w, &h)
         : WebPDecodeRGB(buf, (size_t)fsize, &w, &h);
-    free(buf);
     if (!pixels) {
+        free(buf);
         return fail(err, errlen, "webp: decode failed");
     }
 
     memset(img, 0, sizeof(*img));
+    webp_meta(buf, (size_t)fsize, &img->meta);
+    free(buf);
+
     img->width = w;
     img->height = h;
     img->bit_depth = 8;

@@ -10,6 +10,19 @@ static int fail(char *err, size_t errlen, const char *msg)
     return -1;
 }
 
+/* libavif hands back the EXIF payload, the ICC profile and the XMP packet
+ * straight from the container. */
+static void avif_meta(const avifImage *im, img_meta_t *m)
+{
+    if (im->exif.size && im->exif.data)
+        img_meta_set_exif(m, im->exif.data, im->exif.size);
+    if (im->icc.size && im->icc.data)
+        img_meta_set_blob(&m->icc, &m->icc_len, im->icc.data, im->icc.size);
+    if (im->xmp.size && im->xmp.data)
+        img_meta_set_blob((uint8_t **)&m->xmp, &m->xmp_len,
+                          im->xmp.data, im->xmp.size);
+}
+
 int avif_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
 {
     if (fseek(f, 0, SEEK_END) != 0)
@@ -74,6 +87,7 @@ int avif_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
     img->height = (int)image->height;
     img->color = IMG_RGBA;
     img->bit_depth = rgb.depth;
+    avif_meta(image, &img->meta);
     int src_sample = (rgb.depth > 8) ? 2 : 1;
     img->rowstride = img_rowstride(img->width, rgb.depth, 4);
     size_t bytes = (size_t)img->height * img->rowstride;

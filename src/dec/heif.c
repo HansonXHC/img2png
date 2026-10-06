@@ -10,6 +10,40 @@ static int fail(char *err, size_t errlen, const char *msg)
     return -1;
 }
 
+/* EXIF and XMP are attached to the image as metadata blocks.  libheif's public
+ * API exposes no ICC accessor, so a HEIF colour profile is not carried over. */
+static void heif_meta(struct heif_image_handle *handle, img_meta_t *m)
+{
+    int nblocks = heif_image_handle_get_number_of_metadata_blocks(handle, NULL);
+    if (nblocks <= 0)
+        return;
+    heif_item_id *ids = (heif_item_id *)malloc(sizeof(heif_item_id) * (size_t)nblocks);
+    if (!ids)
+        return;
+    int n = heif_image_handle_get_list_of_metadata_block_IDs(handle, NULL, ids, nblocks);
+    for (int i = 0; i < n; i++) {
+        const char *type = heif_image_handle_get_metadata_type(handle, ids[i]);
+        const char *ctype = heif_image_handle_get_metadata_content_type(handle, ids[i]);
+        size_t len = heif_image_handle_get_metadata_size(handle, ids[i]);
+        if (!len || len > (size_t)64 * 1024 * 1024)
+            continue;
+        uint8_t *p = (uint8_t *)malloc(len);
+        if (!p)
+            continue;
+        struct heif_error err = heif_image_handle_get_metadata(handle, ids[i], p);
+        if (err.code != heif_error_Ok) {
+            free(p);
+            continue;
+        }
+        if (type && !strcmp(type, "Exif"))
+            img_meta_set_exif(m, p, len);   /* strips the 4-byte offset */
+        else if (ctype && !strcmp(ctype, "application/rdf+xml"))
+            img_meta_set_blob((uint8_t **)&m->xmp, &m->xmp_len, p, len);
+        free(p);
+    }
+    free(ids);
+}
+
 int heif_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
 {
     if (fseek(f, 0, SEEK_END) != 0)
@@ -87,6 +121,7 @@ int heif_decode(FILE *f, img_image_t *img, char *err, size_t errlen)
     img->width = out_w;
     img->height = out_h;
     img->color = IMG_RGBA;
+    heif_meta(handle, &img->meta);
     if (luma_bits > 8) {
         /* 16-bit RRGGBBAA_LE (host order) -> our big-endian 16-bit layout */
         img->bit_depth = 16;
