@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.21)
-project(img2png VERSION 1.2.0 LANGUAGES C CXX)
+project(img2png VERSION 1.3.0 LANGUAGES C CXX)
 
 option(IMG2PNG_GUI "Build the Qt GUI" ON)
 option(IMG2PNG_TESTS "Build tests" ON)
@@ -194,6 +194,57 @@ set(lerc OFF CACHE BOOL "" FORCE)
 add_subdirectory(thirdparty/tiff tiff-build)
 
 # ---------------------------------------------------------------------------
+# modern codecs: libde265 (HEVC), libheif (HEIF container),
+# dav1d shim (AV1), libavif (AVIF container)
+# ---------------------------------------------------------------------------
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(ENABLE_DECODER OFF CACHE BOOL "" FORCE)
+set(ENABLE_ENCODER OFF CACHE BOOL "" FORCE)
+set(ENABLE_SDL OFF CACHE BOOL "" FORCE)
+set(ENABLE_INTERNAL_DEVELOPMENT_TOOLS OFF CACHE BOOL "" FORCE)
+set(WITH_FUZZERS OFF CACHE BOOL "" FORCE)
+# static build: without this the headers use __declspec(dllimport)
+add_compile_definitions(LIBDE265_STATIC_BUILD)
+add_subdirectory(thirdparty/libde265 libde265-build)
+# preset what libheif's FindLIBDE265 would find (it does not support
+# add_subdirectory integration)
+set(LIBDE265_LIBRARY de265)
+# FindLIBDE265 checks for a single directory containing libde265/*.h plus
+# the generated de265-version.h: build a merged include dir
+set(LIBDE265_MERGED_INCLUDE "${CMAKE_BINARY_DIR}/libde265-merged")
+file(MAKE_DIRECTORY "${LIBDE265_MERGED_INCLUDE}/libde265")
+file(COPY ${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libde265/libde265/de265.h
+     DESTINATION "${LIBDE265_MERGED_INCLUDE}/libde265")
+file(COPY "${CMAKE_BINARY_DIR}/libde265-build/libde265/de265-version.h"
+     DESTINATION "${LIBDE265_MERGED_INCLUDE}/libde265")
+set(LIBDE265_INCLUDE_DIR "${LIBDE265_MERGED_INCLUDE}")
+
+add_subdirectory(thirdparty/dav1d dav1d-build)
+# libavif SYSTEM codec mode picks up the existing dav1d target
+set(AVIF_CODEC_DAV1D "SYSTEM" CACHE STRING "" FORCE)
+set(AVIF_BUILD_APPS OFF CACHE BOOL "" FORCE)
+set(AVIF_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(AVIF_BUILD_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(AVIF_LIBYUV OFF CACHE STRING "" FORCE)
+add_subdirectory(thirdparty/libavif libavif-build)
+
+set(ENABLE_PLUGIN_LOADING OFF CACHE BOOL "" FORCE)
+set(WITH_AOM OFF CACHE BOOL "" FORCE)
+set(WITH_DAV1D OFF CACHE BOOL "" FORCE)
+set(WITH_EXAMPLES OFF CACHE BOOL "" FORCE)
+set(WITH_GDK_PIXBUF OFF CACHE BOOL "" FORCE)
+set(BUILD_TESTING OFF CACHE BOOL "" FORCE)
+set(BUILD_DOCUMENTATION OFF CACHE BOOL "" FORCE)
+add_subdirectory(thirdparty/libheif libheif-build)
+# upstream's PUBLIC include points at a non-existent generated dir;
+# the real headers live in libheif/api/libheif
+target_include_directories(heif INTERFACE
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/thirdparty/libheif/libheif/api>
+    $<BUILD_INTERFACE:${libheif_BINARY_DIR}>)
+# static consumers must not use dllimport on Windows
+target_compile_definitions(heif INTERFACE LIBHEIF_STATIC_BUILD)
+
+# ---------------------------------------------------------------------------
 # img2png core
 # ---------------------------------------------------------------------------
 add_library(img2png_core STATIC
@@ -208,7 +259,10 @@ add_library(img2png_core STATIC
     src/dec/qoi.c
     src/dec/webp.c
     src/dec/tiff.c
+    src/dec/heif.c
+    src/dec/avif.c
     src/enc/pngenc.c
+    src/enc/apngenc.c
     src/convert.c
     src/util/threads.c
     src/util/filetime.c
@@ -222,7 +276,7 @@ if(NOT WIN32)
 endif()
 
 target_link_libraries(img2png_core PUBLIC ${IMG2PNG_PNG_TARGET} ${IMG2PNG_JPEG_TARGET}
-    giflib_v qoi webp tiff)
+    giflib_v qoi webp tiff heif avif)
 
 # libjpeg-turbo's targets don't carry PUBLIC include dirs (upstream expects
 # an install layout), so add them directly for source-tree integrations

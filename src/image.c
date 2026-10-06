@@ -33,6 +33,20 @@ void img_free(img_image_t *img)
     }
 }
 
+void img_free_anim(img_animation_t *anim)
+{
+    if (!anim)
+        return;
+    for (int i = 0; i < anim->nframes; i++)
+        img_free(&anim->frames[i]);
+    free(anim->frames);
+    free(anim->x);
+    free(anim->y);
+    free(anim->delays_cs);
+    free(anim->dispose);
+    memset(anim, 0, sizeof(*anim));
+}
+
 #ifdef IMG2PNG_WINDOWS
 static wchar_t *acp_to_wide(const char *s)
 {

@@ -20,6 +20,7 @@
 #include <qoi.h>
 #include <webp/encode.h>
 #include <tiffio.h>
+#include "enc/apngenc.h"
 
 static int g_failures = 0;
 static uint8_t *wp_blob = NULL;
@@ -775,18 +776,354 @@ pgm_done:;
         CHECK(okt, "decode tiff");
         if (f) fclose(f);
         if (okt) {
-            CHECK(img.color == IMG_RGBA && img.width == 5 && img.height == 3, "format is RGBA8 5x3");
+            CHECK(img.color == IMG_RGB && img.bit_depth == 8 &&
+                  img.width == 5 && img.height == 3, "format is RGB8 5x3");
             int diff = -1;
             for (int y = 0; y < 3 && diff < 0; y++)
                 for (int x = 0; x < 5 && diff < 0; x++) {
-                    uint8_t *d = img.data + ((size_t)y * 5 + x) * 4;
-                    if (d[0] != (uint8_t)(x * 40) || d[1] != (uint8_t)(y * 80) || d[2] != 77 || d[3] != 255)
+                    uint8_t *d = img.data + ((size_t)y * 5 + x) * 3;
+                    if (d[0] != (uint8_t)(x * 40) || d[1] != (uint8_t)(y * 80) || d[2] != 77)
                         diff = y * 5 + x;
                 }
             CHECK(diff < 0, "pixels identical (lossless)");
             png_write_file(&img, &opts, "testout/ttiff.png", err, sizeof(err));
             img_free(&img);
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/ttiff.png", &w, &h, &got);
+            CHECK(ch == 3, "png readable as RGB");
+            free(got);
         }
+    }
+
+    /* --- TIFF bit-depth matching: gray 16-bit --- */
+    printf("TIFF gray 16-bit -> GRAY16:\n");
+    {
+        TIFF *tf = TIFFOpen("testout/tg16.tiff", "w");
+        CHECK(tf != NULL, "open tiff for writing");
+        if (tf) {
+            TIFFSetField(tf, TIFFTAG_IMAGEWIDTH, 4);
+            TIFFSetField(tf, TIFFTAG_IMAGELENGTH, 2);
+            TIFFSetField(tf, TIFFTAG_BITSPERSAMPLE, 16);
+            TIFFSetField(tf, TIFFTAG_SAMPLESPERPIXEL, 1);
+            TIFFSetField(tf, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+            TIFFSetField(tf, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            int wok = 1;
+            for (int y = 0; y < 2 && wok; y++) {
+                uint16_t row[4];
+                for (int x = 0; x < 4; x++)
+                    row[x] = (uint16_t)((y * 4 + x) * 12345);
+                wok = TIFFWriteScanline(tf, row, (uint32_t)y, 0) >= 0;
+            }
+            CHECK(wok, "write 16-bit scanlines");
+            TIFFClose(tf);
+        }
+        FILE *f = img_fopen_read("testout/tg16.tiff");
+        img_image_t img;
+        int okg = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(okg, "decode gray16 tiff");
+        if (f) fclose(f);
+        if (okg) {
+            CHECK(img.color == IMG_GRAY && img.bit_depth == 16, "format is GRAY16");
+            int diff = -1;
+            for (int y = 0; y < 2 && diff < 0; y++)
+                for (int x = 0; x < 4 && diff < 0; x++) {
+                    unsigned v = img_ld16be(img.data +
+                        (size_t)y * img.rowstride + (size_t)x * 2);
+                    if (v != (((unsigned)((y * 4 + x) * 12345)) & 0xFFFFu))
+                        diff = y * 4 + x;
+                }
+            CHECK(diff < 0, "16-bit values identical (lossless)");
+            img_free(&img);
+        }
+    }
+
+    /* --- TIFF bit-depth matching: palette 8-bit --- */
+    printf("TIFF palette 8-bit -> PALETTE8:\n");
+    {
+        TIFF *tf = TIFFOpen("testout/tp8.tiff", "w");
+        CHECK(tf != NULL, "open tiff for writing");
+        if (tf) {
+            TIFFSetField(tf, TIFFTAG_IMAGEWIDTH, 5);
+            TIFFSetField(tf, TIFFTAG_IMAGELENGTH, 2);
+            TIFFSetField(tf, TIFFTAG_BITSPERSAMPLE, 8);
+            TIFFSetField(tf, TIFFTAG_SAMPLESPERPIXEL, 1);
+            TIFFSetField(tf, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_PALETTE);
+            TIFFSetField(tf, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            uint16_t rmap[256], gmap[256], bmap[256];
+            for (int i = 0; i < 256; i++) {
+                rmap[i] = (uint16_t)(i * 257);        /* 16->8 scales to i     */
+                gmap[i] = (uint16_t)(65535 - i * 257); /* scales to 255 - i    */
+                bmap[i] = (uint16_t)(i * 257);
+            }
+            TIFFSetField(tf, TIFFTAG_COLORMAP, rmap, gmap, bmap);
+            int wok = 1;
+            for (int y = 0; y < 2 && wok; y++) {
+                uint8_t row[5];
+                for (int x = 0; x < 5; x++)
+                    row[x] = (uint8_t)((x + y) % 256);
+                wok = TIFFWriteScanline(tf, row, (uint32_t)y, 0) >= 0;
+            }
+            CHECK(wok, "write palette scanlines");
+            TIFFClose(tf);
+        }
+        FILE *f = img_fopen_read("testout/tp8.tiff");
+        img_image_t img;
+        int okp = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(okp, "decode palette tiff");
+        if (f) fclose(f);
+        if (okp) {
+            CHECK(img.color == IMG_PALETTE && img.bit_depth == 8, "format is PALETTE8");
+            CHECK(img.pal_ncolors == 256, "256-entry palette");
+            int cmap_ok = 1;
+            for (int i = 0; i < 256 && cmap_ok; i++) {
+                if (img.palette[i*3+0] != (uint8_t)i ||
+                    img.palette[i*3+1] != (uint8_t)(255 - i) ||
+                    img.palette[i*3+2] != (uint8_t)i)
+                    cmap_ok = 0;
+            }
+            CHECK(cmap_ok, "colormap scaled 16->8 correctly");
+            int idx_ok = 1;
+            for (int y = 0; y < 2 && idx_ok; y++)
+                for (int x = 0; x < 5 && idx_ok; x++)
+                    if (img.data[(size_t)y * img.rowstride + x] !=
+                        (uint8_t)((x + y) % 256))
+                        idx_ok = 0;
+            CHECK(idx_ok, "indices identical");
+            img_free(&img);
+        }
+    }
+
+    /* --- TIFF bit-depth matching: bilevel 1-bit --- */
+    printf("TIFF bilevel 1-bit -> GRAY1:\n");
+    {
+        TIFF *tf = TIFFOpen("testout/tb1.tiff", "w");
+        CHECK(tf != NULL, "open tiff for writing");
+        if (tf) {
+            TIFFSetField(tf, TIFFTAG_IMAGEWIDTH, 16);
+            TIFFSetField(tf, TIFFTAG_IMAGELENGTH, 2);
+            TIFFSetField(tf, TIFFTAG_BITSPERSAMPLE, 1);
+            TIFFSetField(tf, TIFFTAG_SAMPLESPERPIXEL, 1);
+            TIFFSetField(tf, TIFFTAG_PHOTOMETRIC, PHOTOMETRIC_MINISBLACK);
+            TIFFSetField(tf, TIFFTAG_PLANARCONFIG, PLANARCONFIG_CONTIG);
+            uint8_t rows[2][2] = {{0x55, 0x55}, {0xAA, 0xAA}};
+            int wok = 1;
+            for (int y = 0; y < 2 && wok; y++)
+                wok = TIFFWriteScanline(tf, rows[y], (uint32_t)y, 0) >= 0;
+            CHECK(wok, "write bilevel scanlines");
+            TIFFClose(tf);
+        }
+        FILE *f = img_fopen_read("testout/tb1.tiff");
+        img_image_t img;
+        int okb = f && tiff_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(okb, "decode bilevel tiff");
+        if (f) fclose(f);
+        if (okb) {
+            CHECK(img.color == IMG_GRAY && img.bit_depth == 1, "format is GRAY1");
+            int s0 = (img.data[0] >> 7) & 1, s1 = (img.data[0] >> 6) & 1;
+            CHECK(s0 == 0 && s1 == 1, "row 0 samples");
+            s0 = (img.data[img.rowstride] >> 7) & 1;
+            s1 = (img.data[img.rowstride] >> 6) & 1;
+            CHECK(s0 == 1 && s1 == 0, "row 1 samples");
+            img_free(&img);
+        }
+    }
+
+
+    /* --- animated GIF -> APNG (3 frames, offsets, disposal, loop) --- */
+    printf("animated GIF -> APNG:\n");
+    {
+        /* write a 6x4 3-frame GIF: frame0 full canvas (opaque), frame1
+         * 4x2 sub-rect at (1,1) with disposal BACKGROUND, frame2 full
+         * canvas with transparency index 3; NETSCAPE loop = 0 (infinite) */
+        int ge = 0;
+        GifFileType *gf = EGifOpenFileName("testout/anim.gif", 0, &ge);
+        CHECK(gf != NULL, "open animated gif for writing");
+        if (gf) {
+            GifColorType pal[4] = {{255,0,0},{0,255,0},{0,0,255},{10,20,30}};
+            ColorMapObject *cm = GifMakeMapObject(4, pal);
+            CHECK(EGifPutScreenDesc(gf, 6, 4, 2, 0, cm) == GIF_OK, "gif screen desc");
+            /* NETSCAPE loop = infinite */
+            uint8_t ns_data[3] = {1, 0, 0};
+            CHECK(EGifPutExtensionLeader(gf, APPLICATION_EXT_FUNC_CODE) == GIF_OK,
+                  "netscape leader");
+            CHECK(EGifPutExtensionBlock(gf, 11, "NETSCAPE2.0") == GIF_OK,
+                  "netscape id");
+            CHECK(EGifPutExtensionBlock(gf, 3, ns_data) == GIF_OK,
+                  "netscape loop data");
+            CHECK(EGifPutExtensionTrailer(gf) == GIF_OK, "netscape trailer");
+
+            struct {
+                int x, y, w, h, delay, dispose, trans;
+                uint8_t fill;
+            } frames[3] = {
+                {0, 0, 6, 4, 10, 1, -1, 0},
+                {1, 1, 4, 2, 20, 2,  3, 1},
+                {0, 0, 6, 4,  5, 1,  3, 2},
+            };
+            int all_ok = 1;
+            for (int i = 0; i < 3 && all_ok; i++) {
+                GraphicsControlBlock gcb;
+                memset(&gcb, 0, sizeof(gcb));
+                gcb.DisposalMode = frames[i].dispose;
+                gcb.UserInputFlag = 0;
+                gcb.DelayTime = frames[i].delay;
+                gcb.TransparentColor = frames[i].trans;
+                uint8_t gcb_buf[8];
+                int gcb_len = EGifGCBToExtension(&gcb, gcb_buf);
+                all_ok &= EGifPutExtension(gf, GRAPHICS_EXT_FUNC_CODE, gcb_len, gcb_buf) == GIF_OK;
+                all_ok &= EGifPutImageDesc(gf, frames[i].x, frames[i].y,
+                                           frames[i].w, frames[i].h, 0, NULL) == GIF_OK;
+                int npix = frames[i].w * frames[i].h;
+                uint8_t raster[64];
+                for (int j = 0; j < npix; j++)
+                    raster[j] = (uint8_t)((frames[i].fill + j) % 4);
+                all_ok &= EGifPutLine(gf, raster, npix) == GIF_OK;
+            }
+            CHECK(all_ok, "write 3 gif frames");
+            CHECK(EGifCloseFile(gf, &ge) == GIF_OK, "close gif");
+            GifFreeMapObject(cm);
+
+            /* decode animation */
+            FILE *f = img_fopen_read("testout/anim.gif");
+            img_animation_t anim;
+            int oka = f && gif_decode_anim(f, &anim, err, sizeof(err)) == 0;
+            CHECK(oka, "gif_decode_anim");
+            if (f) fclose(f);
+            if (oka) {
+                CHECK(anim.nframes == 3 && anim.width == 6 && anim.height == 4,
+                      "3 frames, 6x4 canvas");
+                CHECK(anim.delays_cs[0] == 10 && anim.delays_cs[1] == 20 &&
+                      anim.delays_cs[2] == 5, "per-frame delays preserved");
+                CHECK(anim.dispose[0] == 1 && anim.dispose[1] == 2 &&
+                      anim.dispose[2] == 1, "disposal modes preserved");
+                CHECK(anim.x[1] == 1 && anim.y[1] == 1 &&
+                      anim.frames[1].width == 4 && anim.frames[1].height == 2,
+                      "frame 1 sub-rect offset preserved");
+                CHECK(anim.loops == 0, "NETSCAPE loop=infinite mapped to 0");
+                CHECK(anim.frames[0].color == IMG_RGBA, "frames are RGBA");
+
+                /* write APNG */
+                png_opts_t ao = opts;
+                ao.filter = PNGF_AUTO;
+                CHECK(png_write_apng(&anim, &ao, "testout/anim.png",
+                                     err, sizeof(err)) == 0, "png_write_apng");
+                img_free_anim(&anim);
+
+                /* structural check: walk chunks, verify acTL/fcTL/fdAT */
+                FILE *pf = img_fopen_read("testout/anim.png");
+                CHECK(pf != NULL, "apng readable");
+                if (pf) {
+                    uint8_t sig[8];
+                    int sig_ok = fread(sig, 1, 8, pf) == 8 &&
+                                 !memcmp(sig, "\x89PNG\r\n\x1a\n", 8);
+                    CHECK(sig_ok, "png signature");
+                    int n_actl = 0, n_fctl = 0, n_fdat = 0, n_idat = 0;
+                    uint32_t actl_frames = 0, actl_plays = 999;
+                    int seq_ok = 1;
+                    uint32_t expect_seq = 0;
+                    unsigned char ch[4];
+                    long read_n = 0;
+                    long pos = 8;
+                    fseek(pf, 0, SEEK_END);
+                    long fsize = ftell(pf);
+                    fseek(pf, 8, SEEK_SET);
+                    while (pos + 8 <= fsize) {
+                        uint32_t len = 0;
+                        unsigned char lb[4];
+                        if (fread(lb, 1, 4, pf) != 4) break;
+                        len = ((uint32_t)lb[0] << 24) | ((uint32_t)lb[1] << 16) |
+                              ((uint32_t)lb[2] << 8) | lb[3];
+                        if (fread(ch, 1, 4, pf) != 4) break;
+                        if (!memcmp(ch, "acTL", 4)) {
+                            n_actl++;
+                            unsigned char d[8];
+                            read_n = (fread(d, 1, 8, pf) == 8) ? 8 : 0;
+                            if (read_n == 8) {
+                                actl_frames = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
+                                              ((uint32_t)d[2] << 8) | d[3];
+                                actl_plays  = ((uint32_t)d[4] << 24) | ((uint32_t)d[5] << 16) |
+                                              ((uint32_t)d[6] << 8) | d[7];
+                            }
+                        } else if (!memcmp(ch, "fcTL", 4)) {
+                            n_fctl++;
+                            unsigned char d[26];
+                            read_n = (fread(d, 1, 26, pf) == 26) ? 26 : 0;
+                            if (read_n == 26) {
+                                uint32_t seq = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
+                                               ((uint32_t)d[2] << 8) | d[3];
+                                if (seq != expect_seq) seq_ok = 0;
+                                expect_seq++;
+                            }
+                        } else if (!memcmp(ch, "fdAT", 4)) {
+                            n_fdat++;
+                            unsigned char d[4];
+                            read_n = (fread(d, 1, 4, pf) == 4) ? 4 : 0;
+                            if (read_n == 4) {
+                                uint32_t seq = ((uint32_t)d[0] << 24) | ((uint32_t)d[1] << 16) |
+                                               ((uint32_t)d[2] << 8) | d[3];
+                                if (seq != expect_seq) seq_ok = 0;
+                                expect_seq++;
+                            }
+                        } else if (!memcmp(ch, "IDAT", 4)) {
+                            n_idat++;
+                            read_n = 0;
+                        } else if (!memcmp(ch, "IEND", 4)) {
+                            break;
+                        }
+                        /* skip the unread remainder of data + crc */
+                        fseek(pf, (long)len - (long)read_n + 4, SEEK_CUR);
+                        pos += (long)len + 12;
+                    }
+                    fclose(pf);
+                    CHECK(n_actl == 1, "exactly one acTL");
+                    CHECK(actl_frames == 3, "acTL num_frames = 3");
+                    CHECK(actl_plays == 0, "acTL num_plays = 0 (infinite)");
+                    CHECK(n_fctl == 3, "three fcTL chunks");
+                    CHECK(n_idat == 1, "first frame in IDAT");
+                    CHECK(n_fdat >= 1, "subsequent frames in fdAT");
+                    CHECK(seq_ok, "fcTL/fdAT sequence numbers contiguous");
+                }
+            }
+        }
+    }
+
+
+    /* --- AVIF: decode the vendored 1x1 sample --- */
+    printf("AVIF -> RGBA8:\n");
+    {
+        FILE *f = img_fopen_read("tests/data/white_1x1.avif");
+        img_image_t img;
+        int okv = f && avif_decode(f, &img, err, sizeof(err)) == 0;
+        CHECK(okv, "decode avif sample");
+        if (f) fclose(f);
+        if (okv) {
+            CHECK(img.width == 1 && img.height == 1 && img.color == IMG_RGBA &&
+                  img.bit_depth == 8, "format is RGBA8 1x1");
+            CHECK(img.data[0] > 200 && img.data[1] > 200 && img.data[2] > 200 &&
+                  img.data[3] == 255, "white pixel decoded");
+            png_write_file(&img, &opts, "testout/tavif.png", err, sizeof(err));
+            img_free(&img);
+            int w, h; uint8_t *got = NULL;
+            int ch = read_png_rgba("testout/tavif.png", &w, &h, &got);
+            CHECK(ch == 4 && w == 1 && h == 1, "png readable as RGBA 1x1");
+            free(got);
+        }
+    }
+
+    /* --- HEIF: graceful error path on garbage input --- */
+    printf("HEIF error path:\n");
+    {
+        FILE *f = img_fopen_write("testout/fake.heic");
+        if (f) {
+            fwrite("{garbage-not-a-heif}", 1, 20, f);
+            fclose(f);
+        }
+        f = img_fopen_read("testout/fake.heic");
+        img_image_t img;
+        int rc = f ? heif_decode(f, &img, err, sizeof(err)) : -1;
+        CHECK(rc != 0, "heif rejects garbage");
+        CHECK(err[0] != 0, "error message present");
+        if (f) fclose(f);
     }
 
     printf("\n%s (%d failures)\n", g_failures ? "SELF-TEST FAILED" : "SELF-TEST PASSED", g_failures);

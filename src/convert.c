@@ -17,7 +17,7 @@
 #include "util/platform.h"
 
 typedef enum { FMT_UNKNOWN = 0, FMT_BMP, FMT_TGA, FMT_PNM, FMT_ICO, FMT_JPEG,
-               FMT_PNG, FMT_GIF, FMT_QOI, FMT_WEBP, FMT_TIFF } fmt_t;
+               FMT_PNG, FMT_GIF, FMT_QOI, FMT_WEBP, FMT_TIFF, FMT_HEIF, FMT_AVIF } fmt_t;
 
 static fmt_t fmt_from_ext(const char *path)
 {
@@ -40,6 +40,9 @@ static fmt_t fmt_from_ext(const char *path)
     if (!img_stricmp(dot, "qoi"))                          return FMT_QOI;
     if (!img_stricmp(dot, "webp"))                         return FMT_WEBP;
     if (!img_stricmp(dot, "tif") || !img_stricmp(dot, "tiff")) return FMT_TIFF;
+    if (!img_stricmp(dot, "heic") || !img_stricmp(dot, "heif") ||
+        !img_stricmp(dot, "hif"))                             return FMT_HEIF;
+    if (!img_stricmp(dot, "avif"))                            return FMT_AVIF;
     return FMT_UNKNOWN;
 }
 
@@ -58,7 +61,17 @@ static fmt_t sniff_format(const char *path)
     if (n >= 6 && !memcmp(b, "GIF8", 4)) return FMT_GIF;
     if (n >= 4 && !memcmp(b, "qoif", 4)) return FMT_QOI;
     if (n >= 12 && !memcmp(b, "RIFF", 4) && !memcmp(b + 8, "WEBP", 4)) return FMT_WEBP;
-    if (n >= 4 && ((!memcmp(b, "II*", 3) && 1) || 0)) return FMT_TIFF; /* placeholder */
+    if (n >= 4 && ((!memcmp(b, "II\x2a\x00", 4)) || (!memcmp(b, "MM\x00\x2a", 4)))) return FMT_TIFF;
+    /* ISOBMFF: brand in the ftyp box decides HEIF vs AVIF */
+    if (n >= 12 && !memcmp(b + 4, "ftyp", 4)) {
+        if (!memcmp(b + 8, "avif", 4) || !memcmp(b + 8, "avis", 4))
+            return FMT_AVIF;
+        if (!memcmp(b + 8, "heic", 4) || !memcmp(b + 8, "heix", 4) ||
+            !memcmp(b + 8, "hevc", 4) || !memcmp(b + 8, "heim", 4) ||
+            !memcmp(b + 8, "heis", 4) || !memcmp(b + 8, "mif1", 4) ||
+            !memcmp(b + 8, "msf1", 4))
+            return FMT_HEIF;
+    }
     return FMT_UNKNOWN;
 }
 
@@ -124,6 +137,40 @@ int img2png_convert(const char *in_path, const char *out_path,
 
     img_image_t img;
     int rc;
+    int is_apng = 0;
+    if (fmt == FMT_GIF) {
+        /* animated GIF -> APNG; single-frame GIF falls back below */
+        img_animation_t anim;
+        if (gif_decode_anim(f, &anim, result->err, sizeof(result->err)) == 0 &&
+            anim.nframes > 1) {
+            if (opts->auto_optimize) {
+                /* per-frame auto-optimization is not applied to animations */
+            }
+            result->out_w = anim.width;
+            result->out_h = anim.height;
+            result->out_depth = 8;
+            result->out_color = IMG_RGBA;
+            result->out_frames = anim.nframes;
+            rc = png_write_apng(&anim, opts, out_path,
+                                result->err, sizeof(result->err));
+            img_free_anim(&anim);
+            if (rc != 0)
+                return -1;
+            if (have_times)
+                set_file_times(out_path, ctime, mtime);
+            t1 = img_now_sec();
+            result->secs = t1 - t0;
+            result->in_size = in_size;
+            result->out_size = file_size(out_path);
+            result->ok = 1;
+            fclose(f);
+            return 0;
+        }
+        /* single-frame GIF (or animation decode failure): rewind and use
+         * the still-image path, which keeps PALETTE output */
+        img_free_anim(&anim);   /* safe: anim is zeroed on entry/failure */
+        rewind(f);
+    }
     if (fmt == FMT_PNG) {
         /* verify the magic first: a ".png"-named file may actually be some
          * other format; sniff and convert that instead when recognizable */
@@ -178,6 +225,8 @@ int img2png_convert(const char *in_path, const char *out_path,
         case FMT_QOI:  rc = qoi_decode_file(f, &img, result->err, sizeof(result->err)); break;
         case FMT_WEBP: rc = webp_decode(f, &img, result->err, sizeof(result->err)); break;
         case FMT_TIFF: rc = tiff_decode(f, &img, result->err, sizeof(result->err)); break;
+        case FMT_HEIF: rc = heif_decode(f, &img, result->err, sizeof(result->err)); break;
+        case FMT_AVIF: rc = avif_decode(f, &img, result->err, sizeof(result->err)); break;
         default:
             snprintf(result->err, sizeof(result->err), "unsupported input format");
             rc = -1;
@@ -195,6 +244,7 @@ int img2png_convert(const char *in_path, const char *out_path,
     result->out_h = img.height;
     result->out_depth = img.bit_depth;
     result->out_color = img.color;
+    result->out_frames = 1;
 
     rc = png_write_file(&img, opts, out_path, result->err, sizeof(result->err));
     img_free(&img);

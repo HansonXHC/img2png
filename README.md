@@ -6,6 +6,7 @@ A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6
 
 ## Features
 
+- **Animated GIF → APNG**: multi-frame GIFs become animated PNGs with frame delays, loop counts, per-frame transparency and disposal semantics preserved
 - **Bit-depth matching** (default): the output PNG's color type and bit depth faithfully match the source image — no silent upgrades or downgrades
 - **Lossless compression**: zlib compression level 0–9 (default 9); adaptive row filtering by default
 - **Folder batch processing**: point it at a folder — subdirectories are scanned recursively
@@ -28,7 +29,7 @@ A lossless multi-format image → PNG converter (CLI + GUI), based on libpng 1.6
 | PNM color (P3/P6) | RGB, maxval>255 → 16-bit |
 | JPEG grayscale / color | GRAY / RGB |
 | ICO | largest entry decoded; embedded BMP/PNG keeps its color type and depth |
-| GIF | first frame; PALETTE8 with transparency (tRNS) |
+| GIF | animated GIFs become **animated PNG (APNG)** — frame delays, loop count, per-frame transparency and disposal preserved; single-frame GIFs become PALETTE8 with tRNS |
 | QOI | 8-bit RGB / RGBA |
 | WebP | 8-bit RGB / RGBA (lossy & lossless) |
 | TIFF | 8-bit RGBA via the RGBA interface (all photometric variants) |

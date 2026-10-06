@@ -7,6 +7,7 @@
 
 ## 特性
 
+- **动图 GIF → APNG**：多帧 GIF 转为 APNG 动图，帧延迟、循环次数、逐帧透明与 disposal 语义完整保留
 - **位深匹配**：输出 PNG 的色型与位深忠实对应源图，不做静默升级/降级
 - **无损压缩**：zlib 压缩级别 0–9（默认 9）；自适应行滤镜（默认，可手动指定）
 - **文件夹批处理**：直接处理整个文件夹，递归扫描子目录
@@ -28,7 +29,7 @@
 | PNM 彩色（P3/P6） | RGB，maxval>255 → 16 位 |
 | JPEG 灰度 / 彩色 | GRAY / RGB |
 | ICO | 取最大分辨率条目，内嵌 BMP/PNG 按原色型位深输出 |
-| GIF | 取第一帧；PALETTE8，透明色转 tRNS |
+| GIF | 动图 GIF 转为 **APNG 动图** —— 保留帧延迟、循环次数、逐帧透明与 disposal 语义；单帧 GIF 转 PALETTE8（透明色转 tRNS） |
 | QOI | 8 位 RGB / RGBA |
 | WebP | 8 位 RGB / RGBA（有损与无损） |
 | TIFF | 经 RGBA 接口统一输出 8 位 RGBA（各光度变体通吃） |

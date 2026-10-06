@@ -95,14 +95,18 @@ void ConvertTask::run()
             QFileInfo(out_).absolutePath() == QFileInfo(in_).absolutePath()) {
             replaced = QFile::remove(in_);
         }
-        line = tr2("[完成] %1 (%2 %3位 %4x%5) -> %6  %7 -> %8 字节, %9s%10",
-                   "[done] %1 (%2 %3-bit %4x%5) -> %6  %7 -> %8 bytes, %9s%10")
+        QString frameinfo;
+        if (r.out_frames > 1)
+            frameinfo = tr2("，%1 帧", ", %1 frames").arg(r.out_frames);
+        line = tr2("[完成] %1 (%2 %3位 %4x%5) -> %6  %7 -> %8 字节, %9s%10%11",
+                   "[done] %1 (%2 %3-bit %4x%5) -> %6  %7 -> %8 bytes, %9s%10%11")
                    .arg(in_, img2png_color_name(r.out_color))
                    .arg(r.out_depth).arg(r.out_w).arg(r.out_h)
                    .arg(in_ == out_ ? tr2("（原地）", " (in place)") : out_)
                    .arg(r.in_size).arg(r.out_size)
                    .arg(QString::number(r.secs, 'f', 2))
-                   .arg(replaced ? tr2("，已删除原文件", ", original deleted") : QString());
+                   .arg(replaced ? tr2("，已删除原文件", ", original deleted") : QString())
+                   .arg(frameinfo);
         if (!replaced && in_ == out_ && r.out_size >= r.in_size)
             line += tr2("（原文件已是最佳压缩）", " (source was already optimally compressed)");
     } else {

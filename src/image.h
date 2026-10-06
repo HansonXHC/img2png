@@ -48,6 +48,22 @@ int    img_channels(img_color_t color);
 
 void   img_free(img_image_t *img);
 
+/* Multi-frame image (animated GIF -> APNG).  Each frame is an RGBA
+ * "region" image; x/y are its offset on the canvas.  delays_cs are GIF
+ * native centiseconds; dispose is the raw GIF disposal mode (0..3);
+ * loops: -1 = play once, 0 = infinite, n = n times. */
+typedef struct {
+    int width, height;      /* canvas size */
+    int nframes;
+    img_image_t *frames;    /* nframes entries, RGBA, region-sized */
+    int *x, *y;
+    int *delays_cs;
+    int *dispose;
+    int loops;
+} img_animation_t;
+
+void   img_free_anim(img_animation_t *anim);
+
 /* big-endian 16-bit sample access (matches PNG sample order) */
 static inline void img_st16be(uint8_t *p, unsigned v) { p[0] = (uint8_t)(v >> 8); p[1] = (uint8_t)v; }
 static inline unsigned img_ld16be(const uint8_t *p)   { return ((unsigned)p[0] << 8) | p[1]; }

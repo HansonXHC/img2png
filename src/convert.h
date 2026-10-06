@@ -14,6 +14,7 @@ typedef struct {
     int out_w, out_h;
     int out_depth;
     int out_color;          /* img_color_t of the written PNG */
+    int out_frames;         /* 1 for still images, >1 for APNG */
     unsigned long long in_size, out_size;
     double secs;
     char err[256];

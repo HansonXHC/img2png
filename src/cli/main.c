@@ -298,9 +298,12 @@ int main(int argc, char **argv)
         img2png_result_t *r = &j->result;
         if (r->ok) {
             const int same = !strcmp(j->in_path, j->out_path);
-            printf("[ ok ] %s (%s %d-bit %dx%d) -> %s  %llu -> %llu bytes, %.2fs\n",
+            char frbuf[32] = "";
+            if (r->out_frames > 1)
+                snprintf(frbuf, sizeof(frbuf), " x%d frames", r->out_frames);
+            printf("[ ok ] %s (%s %d-bit %dx%d%s) -> %s  %llu -> %llu bytes, %.2fs\n",
                    j->in_path, img2png_color_name(r->out_color), r->out_depth,
-                   r->out_w, r->out_h, same ? "(in place)" : j->out_path,
+                   r->out_w, r->out_h, frbuf, same ? "(in place)" : j->out_path,
                    r->in_size, r->out_size, r->secs);
         } else {
             printf("[FAIL] %s: %s\n", j->in_path, r->err);
