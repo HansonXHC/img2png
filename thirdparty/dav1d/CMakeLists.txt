@@ -140,6 +140,16 @@ if(WIN32)
         target_compile_definitions(dav1d PRIVATE __USE_MINGW_ANSI_STDIO=1)
     endif()
 endif()
+
+# glibc declares RTLD_DEFAULT only under _GNU_SOURCE; src/lib.c uses it for the
+# dlsym stack-size workaround.  Upstream meson.build adds -D_GNU_SOURCE for
+# linux/gnu targets, so mirror that here.
+if(CMAKE_SYSTEM_NAME STREQUAL "Linux")
+    foreach(_dav1d_target dav1d dav1d_bd8 dav1d_bd16)
+        target_compile_definitions(${_dav1d_target} PRIVATE _GNU_SOURCE)
+    endforeach()
+endif()
+
 target_include_directories(dav1d PUBLIC
     "${DAV1D_SRC_DIR}/include" "${DAV1D_BIN_DIR}")
 target_include_directories(dav1d PRIVATE "${DAV1D_SRC_DIR}")
